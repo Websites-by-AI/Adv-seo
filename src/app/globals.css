@@ -1,11 +1,19 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: var(--font-vazir), "Vazirmatn", ui-sans-serif, system-ui, sans-serif;
-}
-
-:root {
-  color-scheme: dark;
+  --color-ink: #07080b;
+  --color-panel: #0d0f14;
+  --color-panel-2: #11141b;
+  --color-line: rgba(255, 255, 255, 0.07);
+  --color-line-strong: rgba(255, 255, 255, 0.14);
+  --color-gold-300: #ffd78a;
+  --color-gold-400: #f2a93b;
+  --color-gold-500: #d4881f;
+  --color-mint-400: #3ddc97;
+  --color-rose-450: #f0655a;
+  --color-fog-300: #c3c9d4;
+  --color-fog-500: #8b93a3;
+  --font-vazir: "Vazirmatn", "Segoe UI", Tahoma, ui-sans-serif, system-ui, sans-serif;
 }
 
 html {
@@ -13,114 +21,169 @@ html {
 }
 
 body {
-  font-family: var(--font-vazir), ui-sans-serif, system-ui, sans-serif;
-  background:
-    radial-gradient(1200px 600px at 85% -10%, rgba(16, 185, 129, 0.09), transparent 60%),
-    radial-gradient(900px 500px at 10% 0%, rgba(245, 158, 11, 0.06), transparent 55%),
-    #070a0e;
+  font-family: var(--font-vazir);
+  background: var(--color-ink);
+  color: #e8ebf0;
+  overflow-x: hidden;
 }
 
 ::selection {
-  background: rgba(16, 185, 129, 0.35);
-  color: #ecfdf5;
+  background: var(--color-gold-400);
+  color: #14100a;
 }
 
-/* Thin scrollbars */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
-}
-*::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-*::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
+/* ---------- backdrop texture layers ---------- */
+.bg-grid {
+  background-image:
+    linear-gradient(to left, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 56px 56px;
 }
 
-/* Glass card */
-.glass {
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.02));
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(14px);
+.bg-noise {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
 }
 
-.glass-hover {
-  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.35s, box-shadow 0.35s;
-}
-.glass-hover:hover {
-  transform: translateY(-3px);
-  border-color: rgba(52, 211, 153, 0.35);
-  box-shadow: 0 20px 50px -20px rgba(16, 185, 129, 0.25);
+.glow-gold {
+  background: radial-gradient(closest-side, rgba(242, 169, 59, 0.14), transparent 70%);
 }
 
-/* Shimmer headline */
-.shimmer-text {
-  background: linear-gradient(110deg, #e7f9f1 20%, #34d399 40%, #fbbf24 50%, #34d399 60%, #e7f9f1 80%);
-  background-size: 200% auto;
+.card-surface {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.012));
+  border: 1px solid var(--color-line);
+  backdrop-filter: blur(8px);
+}
+
+.card-surface:hover {
+  border-color: rgba(242, 169, 59, 0.35);
+}
+
+.text-gold-gradient {
+  background: linear-gradient(120deg, #ffd78a 10%, #f2a93b 45%, #b06a12 90%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: shimmer 5s linear infinite;
-}
-@keyframes shimmer {
-  to {
-    background-position: -200% center;
-  }
 }
 
-/* Grid backdrop */
-.grid-bg {
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 40%, transparent 100%);
+/* ---------- radar ---------- */
+@keyframes radar-sweep {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.radar-sweep {
+  animation: radar-sweep 2.6s linear infinite;
+  transform-origin: center;
 }
 
-/* Score ring */
-.ring-anim {
-  transition: stroke-dashoffset 1s cubic-bezier(0.22, 1, 0.36, 1);
+@keyframes ping-slow {
+  0% { transform: scale(0.6); opacity: 0.8; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+.ping-slow {
+  animation: ping-slow 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  transform-origin: center;
 }
 
-/* Radar sweep for logo */
-.logo-sweep {
-  animation: radar-spin 4s linear infinite;
+@keyframes dash-flow {
+  to { stroke-dashoffset: -20; }
 }
-@keyframes radar-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.dash-flow {
+  stroke-dasharray: 6 5;
+  animation: dash-flow 1.4s linear infinite;
 }
 
-/* Pulsing dot */
-.pulse-dot::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  background: inherit;
-  animation: ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+@keyframes bar-grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
 }
-@keyframes ping {
-  75%,
-  100% {
-    transform: scale(2.4);
-    opacity: 0;
-  }
+.bar-grow {
+  transform-origin: right;
+  animation: bar-grow 1s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* Printable proposal */
+@keyframes float-soft {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+.float-soft {
+  animation: float-soft 7s ease-in-out infinite;
+}
+
+/* ---------- print / PDF output ---------- */
 @media print {
+  @page {
+    margin: 14mm;
+  }
+  html,
   body {
-    background: #fff !important;
+    background: #ffffff !important;
+    color: #151515 !important;
   }
   .no-print {
     display: none !important;
   }
-  .print-page {
-    color: #111 !important;
-    background: #fff !important;
+  .print-only {
+    display: block !important;
   }
+  .card-surface {
+    background: #ffffff !important;
+    border: 1px solid #d9d9d9 !important;
+    backdrop-filter: none !important;
+    break-inside: avoid;
+    box-shadow: none !important;
+  }
+  .bg-ink,
+  .bg-panel,
+  .bg-ink\/60,
+  .bg-panel\/60 {
+    background: #ffffff !important;
+    color: #151515 !important;
+  }
+  .bg-noise,
+  .bg-grid,
+  .glow-gold {
+    display: none !important;
+  }
+  .text-fog-300,
+  .text-fog-500 {
+    color: #4a4a4a !important;
+  }
+  .text-gold-300,
+  .text-gold-400 {
+    color: #8a5a00 !important;
+  }
+  .text-gold-gradient {
+    background: none !important;
+    color: #8a5a00 !important;
+  }
+  .radar-sweep,
+  .ping-slow,
+  .float-soft,
+  .dash-flow,
+  .bar-grow {
+    animation: none !important;
+  }
+  h1, h2, h3, .font-black {
+    color: #151515 !important;
+  }
+  header.sticky {
+    position: static !important;
+  }
+  main {
+    padding-top: 0 !important;
+  }
+}
+
+/* thin scrollbars */
+*::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
