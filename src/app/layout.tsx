@@ -3,23 +3,25 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "رادار لید | اتوماسیون شکار شرکت‌های غایب از صفحه اول گوگل",
+  title: "اتوماسیون شناسایی و بهبود سئوی شرکت‌های نمایشگاهی",
   description:
-    "اتوماسیون تحلیل شرکت‌های نمایشگاه: کشف کسب‌وکارهایی که در صفحه اول گوگل نیستند، تولید گزارش سئو و پیشنهاد طراحی وب‌سایت ورود به ۱۰ نتیجه اول.",
+    "ابزار خودکار برای بررسی شرکت‌های شرکت‌کننده در نمایشگاه‌ها، شناسایی مواردی که در Google Maps ثبت نشده‌اند و تولید پیشنهاد بهبود سئو برای آن‌ها.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="fa" dir="rtl">
+    <html lang="fa-IR" dir="rtl">
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
         <link
-          href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@100..900&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap"
           rel="stylesheet"
         />
       </head>
-      <body className="min-h-screen bg-ink antialiased">{children}</body>
+      <body className="bg-slate-50 text-slate-900 antialiased" style={{ fontFamily: "'Vazirmatn', sans-serif" }}>
+        {children}
+      </body>
     </html>
   );
 }
