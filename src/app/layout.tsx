@@ -1,25 +1,24 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { Vazirmatn } from "next/font/google";
 import "./globals.css";
 
+const vazir = Vazirmatn({
+  subsets: ["arabic", "latin"],
+  variable: "--font-vazir",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
-  title: "اتوماسیون شناسایی و بهبود سئوی شرکت‌های نمایشگاهی",
+  title: "لیدفِر — اتوماسیون شکار لید نمایشگاهی و پیشنهاد سئو",
   description:
-    "ابزار خودکار برای بررسی شرکت‌های شرکت‌کننده در نمایشگاه‌ها، شناسایی مواردی که در Google Maps ثبت نشده‌اند و تولید پیشنهاد بهبود سئو برای آن‌ها.",
+    "از لیست شرکت‌های نمایشگاه تا پیشنهادنامه آماده سئو؛ شرکت‌هایی که در صفحه اول گوگل نیستند را شکار کنید و پیشنهاد رسیدن به تاپ ۱۰ بدهید.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="fa-IR" dir="rtl">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap"
-          rel="stylesheet"
-        />
-      </head>
-      <body className="bg-slate-50 text-slate-900 antialiased" style={{ fontFamily: "'Vazirmatn', sans-serif" }}>
+    <html lang="fa" dir="rtl" className={vazir.variable}>
+      <body className="min-h-screen bg-[#070a0e] text-zinc-100 antialiased">
         {children}
       </body>
     </html>

@@ -322,6 +322,7 @@ const ROUTE_MAP: { title: string; routes: { href: string; label: string }[] }[] 
       { href: "/api/health", label: "سلامت سرویس" },
       { href: "/api/companies", label: "لیست شرکت‌ها" },
       { href: "/api/serp", label: "اسکن گوگل" },
+      { href: "/api/rfq", label: "استعلام‌های محرمانه" },
       { href: "/api/logs", label: "رویدادها" },
     ],
   },
