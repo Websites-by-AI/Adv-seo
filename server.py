@@ -98,6 +98,9 @@ class AuditParser(HTMLParser):
         self.schema_blocks = 0
         self.schema_types: set[str] = set()
         self.links: set[str] = set()
+        self.social_links: set[str] = set()
+        self.phone_links: set[str] = set()
+        self.email_links: set[str] = set()
         self.text_chars = 0
         self.phone_signal = False
         self.address_signal = False
@@ -138,12 +141,23 @@ class AuditParser(HTMLParser):
             self._buf = []
             self.schema_blocks += 1
         elif tag == "a" and a.get("href"):
-            href = urljoin(self.base_url, a["href"])
+            raw_href = a["href"].strip()
+            raw = raw_href.lower()
+            if raw.startswith("tel:"):
+                self.phone_links.add(raw_href[4:].strip())
+                self.phone_signal = True
+                return
+            if raw.startswith("mailto:"):
+                self.email_links.add(raw_href[7:].split("?", 1)[0].strip())
+                return
+            href = urljoin(self.base_url, raw_href)
             parsed = urlparse(href)
             if parsed.scheme in {"http", "https"}:
-                self.links.add(href.split("#", 1)[0])
-            raw = a["href"].lower()
-            if any(x in raw for x in ("instagram.com", "maps.google", "goo.gl/maps", "wa.me", "t.me")):
+                clean_href = href.split("#", 1)[0]
+                self.links.add(clean_href)
+                if any(x in parsed.netloc.lower() for x in ("instagram.com", "linkedin.com", "facebook.com", "youtube.com", "aparat.com", "t.me", "wa.me", "eitaa.com", "rubika.ir", "splus.ir", "bale.ai")):
+                    self.social_links.add(clean_href)
+            if any(x in raw for x in ("instagram.com", "maps.google", "goo.gl/maps", "wa.me", "t.me", "eitaa.com", "rubika.ir", "splus.ir", "bale.ai")):
                 self.map_or_social_signal = True
 
     def handle_endtag(self, tag):
@@ -310,6 +324,14 @@ def audit(url: str):
     robots = endpoint_exists(final_url, "robots.txt")
     sitemap = endpoint_exists(final_url, "sitemap.xml")
     score, issues, wins = score_audit(status, final_url, parser, robots, sitemap)
+    base_host = (urlparse(final_url).hostname or "").lower().removeprefix("www.")
+    internal_urls, external_urls = [], []
+    for link in sorted(parser.links):
+        host = (urlparse(link).hostname or "").lower().removeprefix("www.")
+        if host == base_host:
+            internal_urls.append(link)
+        else:
+            external_urls.append(link)
     return {
         "ok": True,
         "requestedUrl": url,
@@ -326,7 +348,13 @@ def audit(url: str):
         "canonical": parser.canonical,
         "lang": parser.lang,
         "schemaTypes": sorted(parser.schema_types),
-        "internalLinks": len(parser.links),
+        "internalLinks": len(internal_urls),
+        "externalLinks": len(external_urls),
+        "internalLinkSamples": internal_urls[:24],
+        "externalLinkSamples": external_urls[:16],
+        "socialLinks": sorted(parser.social_links)[:16],
+        "phoneLinks": sorted(parser.phone_links)[:12],
+        "emailLinks": sorted(parser.email_links)[:12],
         "textCharacters": parser.text_chars,
         "robots": robots,
         "sitemap": sitemap,
@@ -628,6 +656,11 @@ def generate_ai_seo_review(payload: dict):
         "canonical": str(measured.get("canonical", ""))[:500],
         "schemaTypes": measured.get("schemaTypes", [])[:30] if isinstance(measured.get("schemaTypes"), list) else [],
         "internalLinks": measured.get("internalLinks"),
+        "externalLinks": measured.get("externalLinks"),
+        "internalLinkSamples": measured.get("internalLinkSamples", [])[:12] if isinstance(measured.get("internalLinkSamples"), list) else [],
+        "socialLinks": measured.get("socialLinks", [])[:10] if isinstance(measured.get("socialLinks"), list) else [],
+        "phoneLinks": measured.get("phoneLinks", [])[:8] if isinstance(measured.get("phoneLinks"), list) else [],
+        "emailLinks": measured.get("emailLinks", [])[:8] if isinstance(measured.get("emailLinks"), list) else [],
         "textCharacters": measured.get("textCharacters"),
         "robots": measured.get("robots"),
         "sitemap": measured.get("sitemap"),
