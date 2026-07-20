@@ -1,7 +1,3 @@
 {
-  "dialect": "postgresql",
-  "schema": "./src/db/schema.ts",
-  "dbCredentials": {
-    "url": "postgresql://postgres:postgres@127.0.0.1:5432/app_db"
-  }
+  "_note": "Placeholder. This project does not use Drizzle. Original file left over from the Next.js template."
 }
