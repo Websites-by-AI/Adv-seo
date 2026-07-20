@@ -23,6 +23,8 @@ from server import (  # noqa: E402
     audit,
     generate_seo_article,
     generate_ai_seo_review,
+    analyze_clinic_candidates_ai,
+    export_clinic_candidates,
     make_proposal_pdf,
     provider_status,
     search_vendors,
@@ -135,6 +137,19 @@ def audit_route():
 @app.post("/api/ai-seo-review")
 def ai_seo_review_route():
     return jsonify(generate_ai_seo_review(json_body()))
+
+
+@app.post("/api/analyze-clinic-candidates")
+def analyze_clinic_candidates_route():
+    return jsonify(analyze_clinic_candidates_ai(json_body()))
+
+
+@app.post("/api/export-clinics")
+def export_clinics_route():
+    content, filename, content_type = export_clinic_candidates(json_body())
+    return Response(content, mimetype=content_type.split(";", 1)[0], headers={
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    })
 
 
 @app.post("/api/vendor-search")

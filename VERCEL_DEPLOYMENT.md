@@ -60,8 +60,15 @@ CLINIC_DISCOVERY_URLS=https://approved-directory.example/clinics
 CRON_SECRET=LONG_RANDOM_SECRET
 LEAD_INGEST_WEBHOOK_URL=https://your-storage-adapter.example/leads
 LEAD_INGEST_WEBHOOK_TOKEN=SECRET
+# The server auto-detects either URL name:
 SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+# or NEXT_PUBLIC_SUPABASE_URL from the Vercel integration
+
+# The server auto-detects either server-only key name:
 SUPABASE_SERVICE_ROLE_KEY=SECRET
+# or SUPABASE_SECRET_KEY from the Vercel integration
+
+# Optional; defaults automatically:
 SUPABASE_LEADS_TABLE=clinic_leads
 ```
 

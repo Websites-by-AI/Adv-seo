@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 import ipaddress
 import json
@@ -20,7 +21,7 @@ import time
 from collections import defaultdict, deque
 from email.message import EmailMessage
 from html.parser import HTMLParser
-from io import BytesIO
+from io import BytesIO, StringIO
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -53,6 +54,13 @@ try:
     BIDI_FALLBACK_AVAILABLE = True
 except Exception:
     BIDI_FALLBACK_AVAILABLE = False
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    OPENPYXL_AVAILABLE = True
+except Exception:
+    OPENPYXL_AVAILABLE = False
 
 
 def public_url(url: str) -> tuple[bool, str]:
@@ -380,6 +388,8 @@ def provider_status():
         "divar": bool(os.getenv("DIVAR_PARTNER_WEBHOOK_URL")),
     }
     divar_slug = re.sub(r"[^a-zA-Z0-9_-]", "", os.getenv("DIVAR_APP_SLUG", ""))
+    database = supabase_settings()
+    webhook_database = bool(os.getenv("LEAD_DATABASE_WEBHOOK_URL") or os.getenv("LEAD_INGEST_WEBHOOK_URL"))
     return {
         "ok": True,
         "sendEnabled": SEND_ENABLED,
@@ -389,8 +399,10 @@ def provider_status():
         "clinicSearchConfigured": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL") or os.getenv("BRAVE_SEARCH_API_KEY")),
         "geminiConfigured": bool(get_gemini_keys()),
         "scraperConfigured": bool(scraper_allowed_domains()),
-        "leadDatabaseConfigured": bool((os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")) or os.getenv("LEAD_DATABASE_WEBHOOK_URL") or os.getenv("LEAD_INGEST_WEBHOOK_URL")),
-        "leadDatabaseProvider": "supabase" if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY") else "webhook" if os.getenv("LEAD_DATABASE_WEBHOOK_URL") or os.getenv("LEAD_INGEST_WEBHOOK_URL") else "none",
+        "leadDatabaseConfigured": bool(database["configured"] or webhook_database),
+        "leadDatabaseProvider": "supabase" if database["configured"] else "webhook" if webhook_database else "none",
+        "leadDatabaseTable": database["table"],
+        "leadDatabaseDetectedVariables": {"url": database["urlVariable"], "key": database["keyVariable"]},
         "geminiModel": os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"),
         "proposalPdfMode": "direct-download" if PILLOW_AVAILABLE else "browser-print",
         "pdfTextEngine": "raqm" if RAQM_AVAILABLE else "arabic-reshaper+bidi" if BIDI_FALLBACK_AVAILABLE else "basic",
@@ -732,6 +744,71 @@ Required JSON schema:
         "keyNumber": key_number,
         "disclaimer": "Measured audit fields are deterministic observations. AI scores and recommendations are advisory and require human validation."
     }
+
+
+def analyze_clinic_candidates_ai(payload: dict):
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    if not items:
+        raise ValueError("Select at least one clinic candidate for AI analysis.")
+    language = "en" if str(payload.get("language", "fa")).lower() == "en" else "fa"
+    compact = []
+    for index, item in enumerate(items[:20]):
+        if not isinstance(item, dict):
+            continue
+        compact.append({"index": index, "name": str(item.get("name", ""))[:220],
+                        "website": str(item.get("website", ""))[:500],
+                        "summary": str(item.get("summary", ""))[:700],
+                        "currentType": str(item.get("resultType", "web-result"))[:80],
+                        "specialty": str(item.get("specialty", ""))[:150],
+                        "phone": str(item.get("phone", ""))[:100],
+                        "address": str(item.get("address", ""))[:300]})
+    output_language = "English" if language == "en" else "Persian"
+    prompt = f"""You classify public web-search results for a medical-clinic lead database. Return JSON only. Write all explanatory strings in {output_language}.
+
+Candidates:
+{json.dumps(compact, ensure_ascii=False, indent=2)}
+
+Rules:
+- Do not claim a result is licensed, active or official without evidence.
+- Distinguish an actual clinic/physician profile from a list article, price article, directory page or unrelated page.
+- Normalize the display name by removing domains, URLs, breadcrumbs, year labels, marketing symbols and generic list prefixes.
+- Do not infer patient traits, health conditions, income or medical outcomes.
+- confidence is advisory based only on supplied title/URL/snippet.
+- priority is for verification workflow, not medical quality.
+- Return one result for every input index.
+
+Schema:
+{{"items":[{{"index":0,"normalizedName":"string","isLikelyMedicalClinic":true,"resultType":"official-clinic|physician-profile|directory-profile|list-article|price-article|unrelated|uncertain","specialty":"string","confidence":0,"priority":"high|medium|low","reason":"string","recommendedNextStep":"string"}}]}}
+"""
+    raw, key_number, model = call_gemini(prompt, temperature=0.15, max_tokens=7000)
+    parsed = parse_ai_json(raw)
+    results = parsed.get("items") if isinstance(parsed.get("items"), list) else []
+    output = []
+    valid_types = {"official-clinic", "physician-profile", "directory-profile", "list-article", "price-article", "unrelated", "uncertain"}
+    for result in results[:20]:
+        if not isinstance(result, dict):
+            continue
+        try:
+            index = int(result.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index < 0 or index >= len(compact):
+            continue
+        try:
+            confidence = max(0, min(100, int(result.get("confidence", 0))))
+        except (TypeError, ValueError):
+            confidence = 0
+        result_type = str(result.get("resultType", "uncertain"))
+        if result_type not in valid_types:
+            result_type = "uncertain"
+        output.append({"index": index, "normalizedName": str(result.get("normalizedName", compact[index]["name"]))[:180],
+                       "isLikelyMedicalClinic": bool(result.get("isLikelyMedicalClinic", False)),
+                       "resultType": result_type, "specialty": str(result.get("specialty", compact[index]["specialty"]))[:150],
+                       "confidence": confidence, "priority": str(result.get("priority", "medium"))[:20],
+                       "reason": str(result.get("reason", ""))[:500],
+                       "recommendedNextStep": str(result.get("recommendedNextStep", ""))[:500]})
+    return {"ok": True, "items": output, "model": model, "keyNumber": key_number,
+            "disclaimer": "AI classification is advisory. Verify identity, medical license, official ownership and contact data independently."}
 
 
 def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 20):
@@ -1361,6 +1438,134 @@ def run_configured_discovery():
             "warning": "Without Supabase or a lead database webhook, serverless cron results are not persisted."}
 
 
+def clinic_export_rows(items: list[dict]):
+    rows = []
+    for item in items[:500]:
+        if not isinstance(item, dict):
+            continue
+        ai = item.get("aiAnalysis") if isinstance(item.get("aiAnalysis"), dict) else {}
+        rows.append({
+            "name": str(ai.get("normalizedName") or item.get("name", ""))[:250],
+            "website": str(item.get("website", ""))[:500],
+            "phone": str(item.get("phone", ""))[:100],
+            "address": str(item.get("address", ""))[:500],
+            "specialty": str(ai.get("specialty") or item.get("specialty", ""))[:180],
+            "result_type": str(ai.get("resultType") or item.get("resultType", "candidate"))[:80],
+            "ai_confidence": ai.get("confidence", ""),
+            "ai_priority": str(ai.get("priority", ""))[:30],
+            "ai_reason": str(ai.get("reason", ""))[:500],
+            "recommended_next_step": str(ai.get("recommendedNextStep") or item.get("recommendedAction", ""))[:500],
+            "source": str(item.get("source", ""))[:500],
+            "verified": bool(item.get("verified", False)),
+        })
+    return rows
+
+
+def export_clinic_candidates(payload: dict):
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    rows = clinic_export_rows(items)
+    if not rows:
+        raise ValueError("No clinic candidates were supplied for export.")
+    fmt = str(payload.get("format", "csv")).lower()
+    title = str(payload.get("title", "Clinic Discovery Results"))[:150]
+    columns = ["name", "website", "phone", "address", "specialty", "result_type", "ai_confidence", "ai_priority", "ai_reason", "recommended_next_step", "source", "verified"]
+    if fmt == "csv":
+        stream = StringIO()
+        writer = csv.DictWriter(stream, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+        return ("\ufeff" + stream.getvalue()).encode("utf-8"), "clinic-discovery.csv", "text/csv; charset=utf-8"
+    if fmt == "xlsx":
+        if not OPENPYXL_AVAILABLE:
+            raise ValueError("Excel export requires openpyxl.")
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Clinic Leads"
+        ws.sheet_view.rightToLeft = True
+        ws.freeze_panes = "A2"
+        header_fill = PatternFill("solid", fgColor="17324D")
+        for col, name in enumerate(columns, 1):
+            cell = ws.cell(1, col, name)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+        for row_index, row in enumerate(rows, 2):
+            for col, name in enumerate(columns, 1):
+                cell = ws.cell(row_index, col, row.get(name, ""))
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        widths = [28, 42, 18, 38, 25, 22, 14, 14, 45, 45, 42, 12]
+        for index, width in enumerate(widths, 1):
+            ws.column_dimensions[chr(64 + index)].width = width
+        output = BytesIO()
+        wb.save(output)
+        return output.getvalue(), "clinic-discovery.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if fmt == "pdf":
+        if not PILLOW_AVAILABLE:
+            raise ValueError("PDF export requires Pillow.")
+        width, height = 1654, 1169
+        margin = 65
+        bundled = ROOT / "assets" / "fonts"
+        regular_path = str(bundled / "DejaVuSans.ttf")
+        bold_path = str(bundled / "DejaVuSans-Bold.ttf")
+        layout = ImageFont.Layout.RAQM if hasattr(ImageFont, "Layout") and RAQM_AVAILABLE else ImageFont.Layout.BASIC if hasattr(ImageFont, "Layout") else None
+        regular = ImageFont.truetype(regular_path, 20, layout_engine=layout)
+        small = ImageFont.truetype(regular_path, 15, layout_engine=layout)
+        bold_font = ImageFont.truetype(bold_path, 27, layout_engine=layout)
+        row_font = ImageFont.truetype(bold_path, 18, layout_engine=layout)
+        def shape(value):
+            value = str(value)
+            if RAQM_AVAILABLE or not re.search(r"[\u0600-\u06FF]", value):
+                return value
+            if BIDI_FALLBACK_AVAILABLE:
+                try: return bidi_get_display(arabic_reshaper.reshape(value))
+                except Exception: return value
+            return value
+        def draw_text(draw, xy, value, font, fill, anchor="ra"):
+            if RAQM_AVAILABLE:
+                try:
+                    draw.text(xy, str(value), font=font, fill=fill, anchor=anchor, direction="rtl", language="fa")
+                    return
+                except (ValueError, TypeError, KeyError): pass
+            draw.text(xy, shape(value), font=font, fill=fill, anchor=anchor)
+        pages = []
+        per_page = 10
+        for offset in range(0, len(rows), per_page):
+            page = Image.new("RGB", (width, height), "white")
+            draw = ImageDraw.Draw(page)
+            draw.rectangle((0, 0, width, 105), fill="#17324D")
+            draw_text(draw, (width-margin, 34), title, bold_font, "white")
+            draw_text(draw, (margin, 42), f"{offset+1}-{min(offset+per_page,len(rows))} / {len(rows)}", regular, "#C6D7E4", anchor="la")
+            y = 130
+            for number, row in enumerate(rows[offset:offset+per_page], offset+1):
+                draw.rounded_rectangle((margin, y, width-margin, y+86), radius=12, fill="#F4F7F9", outline="#DCE6EE")
+                draw_text(draw, (width-margin-18, y+12), f"{number}. {row['name']}", row_font, "#17324D")
+                details = f"{row['specialty']} | {row['result_type']} | AI: {row['ai_confidence'] or '—'} | {row['phone'] or '—'}"
+                draw_text(draw, (width-margin-18, y+43), details[:150], small, "#526B7C")
+                draw.text((margin+18, y+60), row['website'][:110], font=small, fill="#246BFD", anchor="ls")
+                y += 94
+            pages.append(page)
+        output = BytesIO()
+        pages[0].save(output, format="PDF", save_all=True, append_images=pages[1:], resolution=150.0, title=title)
+        return output.getvalue(), "clinic-discovery.pdf", "application/pdf"
+    raise ValueError("Export format must be csv, xlsx or pdf.")
+
+
+def first_environment_value(*names):
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value, name
+    return "", ""
+
+
+def supabase_settings():
+    url, url_name = first_environment_value("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "VITE_SUPABASE_URL", "PUBLIC_SUPABASE_URL")
+    key, key_name = first_environment_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_KEY")
+    table = re.sub(r"[^a-zA-Z0-9_]", "", os.getenv("SUPABASE_LEADS_TABLE", "clinic_leads")) or "clinic_leads"
+    return {"url": url.rstrip("/"), "key": key, "table": table, "urlVariable": url_name, "keyVariable": key_name,
+            "configured": bool(url and key)}
+
+
 def normalize_lead_row(item: dict):
     website = str(item.get("website", "")).strip()[:500]
     return {
@@ -1380,13 +1585,12 @@ def normalize_lead_row(item: dict):
 
 def persist_leads_database(items: list[dict]):
     rows = [normalize_lead_row(item) for item in items[:100] if isinstance(item, dict)]
-    rows = [row for row in rows if row["website"] or row["name"]]
+    rows = [row for row in rows if row["website"]]
     if not rows:
         raise ValueError("No valid lead rows were supplied.")
-    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    table = re.sub(r"[^a-zA-Z0-9_]", "", os.getenv("SUPABASE_LEADS_TABLE", "clinic_leads"))
-    if supabase_url and supabase_key:
+    settings = supabase_settings()
+    supabase_url, supabase_key, table = settings["url"], settings["key"], settings["table"]
+    if settings["configured"]:
         endpoint = f"{supabase_url}/rest/v1/{table}?on_conflict=website"
         response = requests.post(endpoint, headers={"apikey": supabase_key,
             "Authorization": f"Bearer {supabase_key}", "Content-Type": "application/json",
@@ -1394,7 +1598,9 @@ def persist_leads_database(items: list[dict]):
         if not response.ok:
             raise ValueError(f"Supabase HTTP {response.status_code}: {response.text[:500]}")
         data = response.json() if response.text else []
-        return {"ok": True, "provider": "supabase", "saved": len(rows), "items": data}
+        return {"ok": True, "provider": "supabase", "saved": len(rows), "items": data,
+                "detectedVariables": {"url": settings["urlVariable"], "key": settings["keyVariable"]},
+                "table": table}
     webhook = os.getenv("LEAD_DATABASE_WEBHOOK_URL", "") or os.getenv("LEAD_INGEST_WEBHOOK_URL", "")
     if webhook:
         token = os.getenv("LEAD_DATABASE_WEBHOOK_TOKEN", "") or os.getenv("LEAD_INGEST_WEBHOOK_TOKEN", "")
@@ -1405,17 +1611,17 @@ def persist_leads_database(items: list[dict]):
 
 
 def fetch_leads_database(limit: int = 100):
-    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    table = re.sub(r"[^a-zA-Z0-9_]", "", os.getenv("SUPABASE_LEADS_TABLE", "clinic_leads"))
-    if not supabase_url or not supabase_key:
-        raise ValueError("Supabase lead database is not configured.")
+    settings = supabase_settings()
+    supabase_url, supabase_key, table = settings["url"], settings["key"], settings["table"]
+    if not settings["configured"]:
+        raise ValueError("Supabase lead database is not configured. Expected URL: SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL; expected server key: SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY.")
     endpoint = f"{supabase_url}/rest/v1/{table}?select=*&order=created_at.desc&limit={max(1,min(limit,500))}"
     response = requests.get(endpoint, headers={"apikey": supabase_key,
         "Authorization": f"Bearer {supabase_key}"}, timeout=30)
     if not response.ok:
         raise ValueError(f"Supabase HTTP {response.status_code}: {response.text[:500]}")
-    return {"ok": True, "provider": "supabase", "items": response.json()}
+    return {"ok": True, "provider": "supabase", "items": response.json(), "table": table,
+            "detectedVariables": {"url": settings["urlVariable"], "key": settings["keyVariable"]}}
 
 
 def make_proposal_pdf(payload: dict) -> tuple[bytes, str]:
@@ -1721,14 +1927,23 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/audit", "/api/ai-seo-review", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/import-search-html", "/api/enrich-clinics", "/api/scrape-directory", "/api/leads/bulk", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
+        if path not in {"/api/audit", "/api/ai-seo-review", "/api/analyze-clinic-candidates", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/import-search-html", "/api/enrich-clinics", "/api/scrape-directory", "/api/leads/bulk", "/api/export-clinics", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
             return self.json_response({"ok": False, "error": "Not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/proposal-link", "/api/send", "/api/import-search-html", "/api/enrich-clinics", "/api/leads/bulk"} else 30_000
+            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/proposal-link", "/api/send", "/api/import-search-html", "/api/enrich-clinics", "/api/leads/bulk", "/api/export-clinics", "/api/analyze-clinic-candidates"} else 30_000
             if length <= 0 or length > request_limit:
                 raise ValueError("Invalid request size")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if path == "/api/export-clinics":
+                content, filename, content_type = export_clinic_candidates(payload)
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
             if path == "/api/proposal-link":
                 token, filename, expires_at = store_proposal_link(payload)
                 return self.json_response({"ok": True, "url": f"{self.public_base_url()}/p/{token}.pdf",
@@ -1746,6 +1961,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/ai-seo-review":
                 return self.json_response(generate_ai_seo_review(payload))
+            if path == "/api/analyze-clinic-candidates":
+                return self.json_response(analyze_clinic_candidates_ai(payload))
             if path == "/api/send":
                 return self.json_response(send_message(payload))
             if path == "/api/vendor-search":
@@ -1771,6 +1988,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json_response({"ok": False, "error": str(exc), "type": type(exc).__name__}, 400)
         except Exception as exc:
             label = ("AI SEO review" if path == "/api/ai-seo-review" else
+                     "AI clinic classification" if path == "/api/analyze-clinic-candidates" else
+                     "Clinic export" if path == "/api/export-clinics" else
                      "Send" if path == "/api/send" else
                      "Vendor search" if path == "/api/vendor-search" else
                      "Clinic search" if path == "/api/clinic-search" else
