@@ -12,6 +12,13 @@ export const exhibitions = pgTable("exhibitions", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   sourceUrl: text("source_url"),
+  country: text("country").default("ایران"),
+  city: text("city"),
+  venue: text("venue"),
+  startDate: text("start_date"),
+  endDate: text("end_date"),
+  year: text("year"),
+  isInternational: boolean("is_international").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
@@ -24,15 +31,31 @@ export const companies = pgTable("companies", {
   }),
   name: text("name").notNull(),
   phone: text("phone"),
+  email: text("email"),
+  address: text("address"),
   website: text("website"),
   sourceUrl: text("source_url"),
   category: text("category"),
+  booth: text("booth"),
+  country: text("country"),
+  websiteStatus: text("website_status").default("unknown"),
+  opportunityScore: integer("opportunity_score").default(0),
+  recommendedPackage: text("recommended_package"),
+  googleStatus: text("google_status").notNull().default("not_checked"),
+  googlePlaceName: text("google_place_name"),
+  googleMapsUrl: text("google_maps_url"),
+  checkedAt: timestamp("checked_at", { withTimezone: true }),
+  priority: integer("priority").notNull().default(50),
+  notes: text("notes"),
   googleRank: integer("google_rank"),
   onFirstPage: boolean("on_first_page"),
   rankMode: text("rank_mode"), // 'live' | 'simulated'
   rankCheckedAt: timestamp("rank_checked_at", { withTimezone: true }),
   status: text("status").notNull().default("new"), // new | checked | audited | proposal_ready
   createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
 });
@@ -106,6 +129,7 @@ export const proposals = pgTable("proposals", {
   penalties: jsonb("penalties").$type<PenaltyItem[]>().notNull().default([]),
   totalMin: integer("total_min"),
   totalMax: integer("total_max"),
+  status: text("status").notNull().default("draft"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),

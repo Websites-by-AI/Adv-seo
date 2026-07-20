@@ -243,7 +243,9 @@ export function Badge({
 /* ---------------- Shared site header (with routes) ---------------- */
 const NAV = [
   { href: "/", label: "داشبورد لیدها" },
+  { href: "/international-exhibitions", label: "نمایشگاه‌های بین‌المللی" },
   { href: "/compare", label: "نبرد صفحه اول گوگل" },
+  { href: "/rfq", label: "استعلام مجری سئو" },
 ];
 
 export function SiteHeader({
@@ -312,6 +314,7 @@ const ROUTE_MAP: { title: string; routes: { href: string; label: string }[] }[] 
     title: "صفحات",
     routes: [
       { href: "/", label: "داشبورد لیدها" },
+      { href: "/international-exhibitions", label: "لیدهای نمایشگاه بین‌المللی" },
       { href: "/compare", label: "نبرد صفحه اول گوگل" },
       { href: "/proposal/1", label: "نمونه پیشنهادنامه چاپی" },
     ],
