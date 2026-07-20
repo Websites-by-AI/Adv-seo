@@ -1,5 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "echo 'Using prebuilt Clinic Signal frontend'",
+  "outputDirectory": "public",
   "functions": {
     "api/index.py": {
       "maxDuration": 30,

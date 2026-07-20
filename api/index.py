@@ -21,6 +21,7 @@ from server import (  # noqa: E402
     PILLOW_AVAILABLE,
     SEND_LOG,
     audit,
+    generate_seo_article,
     make_proposal_pdf,
     provider_status,
     search_vendors,
@@ -132,6 +133,11 @@ def vendor_route():
 @app.post("/api/clinic-search")
 def clinic_search_route():
     return jsonify(search_clinics(json_body()))
+
+
+@app.post("/api/generate-article")
+def generate_article_route():
+    return jsonify(generate_seo_article(json_body()))
 
 
 @app.post("/api/send")

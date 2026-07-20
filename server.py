@@ -6,11 +6,14 @@ import base64
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
 import smtplib
 import socket
+
+import requests
 import ssl
 import time
 from collections import defaultdict, deque
@@ -345,6 +348,8 @@ def provider_status():
         "providers": providers,
         "vendorSearchConfigured": bool(os.getenv("VENDOR_SEARCH_WEBHOOK_URL")),
         "clinicSearchConfigured": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL") or os.getenv("BRAVE_SEARCH_API_KEY")),
+        "geminiConfigured": bool(get_gemini_keys()),
+        "geminiModel": os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"),
         "proposalPdfMode": "direct-download" if PILLOW_AVAILABLE else "browser-print",
         "pdfLinkTtlSeconds": PDF_LINK_TTL,
         "pdfLinksEphemeral": True,
@@ -382,6 +387,192 @@ def rate_limit(channel: str, recipient: str):
             raise ValueError("Rate limit reached. Wait before sending again.")
     for key in keys:
         RATE_BUCKETS[key].append(now)
+
+
+def get_gemini_keys():
+    keys = []
+    for index in range(1, 4):
+        value = os.getenv(f"GEMINI_API_KEY{index}", "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    fallback = os.getenv("GEMINI_API_KEY", "").strip()
+    if fallback and fallback not in keys:
+        keys.append(fallback)
+    return keys
+
+
+def call_gemini(prompt: str, temperature: float = 0.65, max_tokens: int = 12000):
+    keys = get_gemini_keys()
+    if not keys:
+        raise ValueError("No Gemini API key is configured. Add GEMINI_API_KEY1 or GEMINI_API_KEY.")
+    model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest").strip()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    config = {"maxOutputTokens": max(1000, min(max_tokens, 16000)), "temperature": temperature}
+    if os.getenv("GEMINI_USE_THINKING", "false").lower() == "true":
+        config["thinkingConfig"] = {"thinkingLevel": "low"}
+    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config}
+    errors = []
+    for number, key in enumerate(keys, 1):
+        try:
+            response = requests.post(url, headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                                     json=payload, timeout=120)
+            data = response.json() if response.text else {}
+            if not response.ok:
+                error = data.get("error", {}) if isinstance(data, dict) else {}
+                status = str(error.get("status", ""))
+                message = str(error.get("message", response.text or "Unknown Gemini error"))
+                if response.status_code == 429 or status == "RESOURCE_EXHAUSTED" or "quota" in message.lower():
+                    errors.append(f"key {number}: quota exhausted")
+                    continue
+                raise ValueError(f"Gemini API: {message[:500]}")
+            candidates = data.get("candidates") or []
+            if not candidates:
+                raise ValueError("Gemini returned no candidate.")
+            parts = ((candidates[0].get("content") or {}).get("parts") or [])
+            text = "\n".join(str(part.get("text", "")) for part in parts
+                             if isinstance(part, dict) and not part.get("thought") and part.get("text"))
+            if not text.strip():
+                raise ValueError("Gemini returned an empty article.")
+            return text.strip(), number, model
+        except requests.RequestException as exc:
+            errors.append(f"key {number}: {type(exc).__name__}")
+            continue
+    raise ValueError("All Gemini keys failed or reached quota: " + "; ".join(errors))
+
+
+def split_seo_keywords(raw: str):
+    return [item.strip() for item in re.split(r"،|,|\s+-\s+", raw or "") if item.strip()][:12]
+
+
+def keyword_occurrences(text: str, keyword: str):
+    if not keyword:
+        return 0
+    return len(re.findall(re.escape(keyword), text, flags=re.IGNORECASE))
+
+
+def build_article_prompt(data: dict, target: int, secondary: list[str], min_primary: int, max_primary: int,
+                         min_secondary: int):
+    language = data["language"]
+    title = data["title"]
+    outline = data["outline"]
+    primary = data["primaryKeyword"]
+    secondary_text = "، ".join(secondary) if secondary else "ندارد"
+    rewrite = data.get("isRewrite") is True
+    notes = str(data.get("rewriteNotes", "")).strip()[:1000]
+    if language == "en":
+        prompt = f"""You are a senior human SEO editor. Write a useful, natural, publication-ready article in English.
+
+Title: {title}
+Primary keyword: {primary}
+Secondary keywords: {', '.join(secondary) if secondary else 'none'}
+Required H2 outline (use every line exactly, in this exact order, without adding or rewriting headings):
+{outline}
+
+Requirements:
+- Target {target} words, tolerance ±30 words.
+- Use the exact primary keyword {min_primary} to {max_primary} times, naturally distributed, including once in the first 100 words.
+- Use each secondary keyword at least {min_secondary} times when contextually relevant; never stuff keywords.
+- After the introduction, add an H2 named exactly “Quick overview 👀”, two short sentences and a bullet list.
+- For each supplied H2: a short introduction, useful main content, and a natural transition. Use H3 only where the H2 contains multiple distinct ideas.
+- Prefer active voice, direct reader address, specific examples and practical guidance.
+- Do not invent statistics, medical claims, certifications, prices, testimonials or sources.
+- For medical topics, provide general educational information, avoid diagnosis or treatment promises, and add a short “Medical review required” note.
+- Do not output an SEO report, analysis, preface, or code fence. Output only the article in Markdown.
+"""
+    else:
+        prompt = f"""تو یک ویراستار حرفه‌ای و انسانی سئو هستی. یک مقاله کاربردی، طبیعی و آماده انتشار به زبان فارسی معیار بنویس.
+
+عنوان: {title}
+کلمه کلیدی اصلی: {primary}
+کلمات کلیدی فرعی: {secondary_text}
+Outline اجباری H2 (هر خط را دقیقاً با همین متن و همین ترتیب استفاده کن و عنوانی را تغییر نده):
+{outline}
+
+قواعد:
+- طول هدف {target} کلمه با تلورانس حداکثر ±۳۰ کلمه.
+- عبارت دقیق «{primary}» را بین {min_primary} تا {max_primary} بار، طبیعی و توزیع‌شده استفاده کن و یک بار در ۱۰۰ کلمه اول بیاور.
+- هر کلمه فرعی مرتبط را حداقل {min_secondary} بار طبیعی استفاده کن؛ حشو کلمه ممنوع است.
+- بعد از مقدمه یک H2 با عنوان دقیق «نگاه سریع 👀» شامل دو جمله کوتاه و یک فهرست نقطه‌ای اضافه کن.
+- برای هر H2 داده‌شده: مقدمه کوتاه، محتوای ارزشمند و گذار طبیعی. فقط برای چند ایده مستقل H3 بساز.
+- از لحن مستقیم، فعل معلوم، مثال مشخص و راهکار عملی استفاده کن.
+- آمار، ادعای پزشکی، مجوز، قیمت، رضایت مشتری یا منبع ساختگی تولید نکن.
+- در موضوعات پزشکی فقط اطلاعات آموزشی عمومی بده، تشخیص یا وعده درمان ارائه نکن و در پایان یادداشت کوتاه «نیازمند بازبینی پزشک» اضافه کن.
+- گزارش سئو، توضیح فرایند، مقدمه خارج از مقاله یا code fence تولید نکن. فقط مقاله Markdown را برگردان.
+"""
+    if rewrite:
+        prompt += (f"\nRewrite the article from scratch with a substantially different expression. Address this note: {notes or 'Improve clarity and naturalness'}.\n"
+                   if language == "en" else
+                   f"\nمقاله را از ابتدا با بیان کاملاً متفاوت بازنویسی کن و این ملاحظه را اعمال کن: {notes or 'شفافیت و طبیعی‌بودن متن بهتر شود'}.\n")
+    return prompt
+
+
+def article_report(article: str, data: dict, target: int, secondary: list[str]):
+    words = [word for word in article.split() if word]
+    word_count = len(words)
+    primary = data["primaryKeyword"]
+    primary_count = keyword_occurrences(article, primary)
+    min_primary = math.ceil(max(word_count, 1) * 0.01)
+    max_primary = max(min_primary, math.floor(max(word_count, 1) * 0.015))
+    first_100 = " ".join(words[:100])
+    report = {
+        "wordCount": word_count,
+        "targetWordCount": target,
+        "wordCountPass": abs(word_count - target) <= 30,
+        "primaryKeyword": primary,
+        "primaryCount": primary_count,
+        "primaryMin": min_primary,
+        "primaryMax": max_primary,
+        "density": round(primary_count / max(word_count, 1) * 100, 2),
+        "primaryInFirst100": keyword_occurrences(first_100, primary) > 0,
+        "secondary": [{"keyword": keyword, "count": keyword_occurrences(article, keyword)} for keyword in secondary],
+    }
+    return report
+
+
+def generate_seo_article(payload: dict):
+    language = str(payload.get("language", "fa")).lower()
+    language = "en" if language == "en" else "fa"
+    data = {
+        "language": language,
+        "title": str(payload.get("title", "")).strip()[:300],
+        "outline": str(payload.get("outline", "")).strip()[:5000],
+        "primaryKeyword": str(payload.get("primaryKeyword", "")).strip()[:250],
+        "isRewrite": payload.get("isRewrite") is True,
+        "rewriteNotes": str(payload.get("rewriteNotes", "")).strip()[:1000],
+    }
+    if not data["title"] or not data["outline"] or not data["primaryKeyword"]:
+        raise ValueError("Title, outline and primary keyword are required.")
+    try:
+        target = int(payload.get("targetWordCount", 900))
+    except (TypeError, ValueError):
+        target = 900
+    target = max(800, min(target, 1500))
+    secondary = split_seo_keywords(str(payload.get("secondaryKeywords", "")))
+    min_primary = math.ceil(target * 0.01)
+    max_primary = max(min_primary, math.floor(target * 0.015))
+    min_secondary = max(2, round(target / 900 * 3))
+    prompt = build_article_prompt(data, target, secondary, min_primary, max_primary, min_secondary)
+    article, key_number, model = call_gemini(prompt)
+    article = re.sub(r"\n\s*\*\*\*\s*\n\s*#{2,3}\s*(SEO|سئو).*$", "", article, flags=re.IGNORECASE | re.DOTALL).strip()
+    report = article_report(article, data, target, secondary)
+    needs_correction = (abs(report["wordCount"] - target) > 70 or
+                        report["primaryCount"] < report["primaryMin"] or
+                        report["primaryCount"] > report["primaryMax"])
+    corrected = False
+    if needs_correction and os.getenv("GEMINI_AUTO_CORRECT", "true").lower() != "false":
+        if language == "en":
+            correction = f"""Revise the Markdown article below. Keep every existing H2 heading exactly unchanged. Reach {target} words ±30. Use the exact primary keyword “{data['primaryKeyword']}” between {min_primary} and {max_primary} times, naturally, and once in the first 100 words. Preserve factual caution and do not add fabricated claims. Return only the complete revised article.\n\n{article}"""
+        else:
+            correction = f"""مقاله Markdown زیر را اصلاح کن. تمام H2های موجود را دقیقاً بدون تغییر نگه دار. متن را به {target} کلمه با تلورانس ±۳۰ برسان. عبارت دقیق «{data['primaryKeyword']}» را بین {min_primary} تا {max_primary} بار طبیعی و یک بار در ۱۰۰ کلمه اول استفاده کن. احتیاط علمی را حفظ کن و ادعای ساختگی نساز. فقط متن کامل اصلاح‌شده را برگردان.\n\n{article}"""
+        try:
+            article, key_number, model = call_gemini(correction, temperature=0.45)
+            report = article_report(article, data, target, secondary)
+            corrected = True
+        except Exception:
+            corrected = False
+    return {"ok": True, "article": article, "report": report, "language": language,
+            "model": model, "keyNumber": key_number, "autoCorrected": corrected,
+            "disclaimer": "AI-generated content requires human editorial review; medical content also requires qualified medical review."}
 
 
 def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 20):
@@ -995,7 +1186,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/audit", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/proposal-pdf", "/api/proposal-link"}:
+        if path not in {"/api/audit", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
             return self.json_response({"ok": False, "error": "Not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -1024,6 +1215,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_response(search_vendors(payload))
             if path == "/api/clinic-search":
                 return self.json_response(search_clinics(payload))
+            if path == "/api/generate-article":
+                return self.json_response(generate_seo_article(payload))
             url = str(payload.get("url", "")).strip()
             if not url:
                 raise ValueError("URL is required")
@@ -1034,6 +1227,7 @@ class Handler(SimpleHTTPRequestHandler):
             label = ("Send" if path == "/api/send" else
                      "Vendor search" if path == "/api/vendor-search" else
                      "Clinic search" if path == "/api/clinic-search" else
+                     "Article generation" if path == "/api/generate-article" else
                      "Proposal PDF" if path in {"/api/proposal-pdf", "/api/proposal-link"} else "Audit")
             return self.json_response({"ok": False, "error": f"{label} failed: {type(exc).__name__}: {exc}"}, 500)
 
