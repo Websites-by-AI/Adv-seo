@@ -3,9 +3,12 @@
   "framework": null,
   "buildCommand": "echo 'Using prebuilt Clinic Signal frontend'",
   "outputDirectory": "public",
+  "crons": [
+    { "path": "/api/run-discovery", "schedule": "0 4 * * *" }
+  ],
   "functions": {
     "api/index.py": {
-      "maxDuration": 30,
+      "maxDuration": 60,
       "includeFiles": "{server.py,assets/fonts/**}",
       "excludeFiles": "{public/**,static/**,tests/**,smoke_test.py,sample-proposal-*.pdf,*.zip,__pycache__/**}"
     }

@@ -55,6 +55,11 @@ GEMINI_API_KEY2=OPTIONAL_SECOND_KEY
 GEMINI_API_KEY3=OPTIONAL_THIRD_KEY
 GEMINI_MODEL=gemini-flash-lite-latest
 GEMINI_AUTO_CORRECT=true
+SCRAPER_ALLOWED_DOMAINS=approved-directory.example
+CLINIC_DISCOVERY_URLS=https://approved-directory.example/clinics
+CRON_SECRET=LONG_RANDOM_SECRET
+LEAD_INGEST_WEBHOOK_URL=https://your-storage-adapter.example/leads
+LEAD_INGEST_WEBHOOK_TOKEN=SECRET
 ```
 
 Generate a secret locally:

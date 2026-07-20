@@ -22,10 +22,14 @@ from server import (  # noqa: E402
     SEND_LOG,
     audit,
     generate_seo_article,
+    generate_ai_seo_review,
     make_proposal_pdf,
     provider_status,
     search_vendors,
     search_clinics,
+    parse_search_html,
+    scrape_clinic_directory,
+    run_configured_discovery,
     send_message,
 )
 
@@ -125,6 +129,11 @@ def audit_route():
     return jsonify(audit(str(json_body().get("url", "")).strip()))
 
 
+@app.post("/api/ai-seo-review")
+def ai_seo_review_route():
+    return jsonify(generate_ai_seo_review(json_body()))
+
+
 @app.post("/api/vendor-search")
 def vendor_route():
     return jsonify(search_vendors(json_body()))
@@ -133,6 +142,24 @@ def vendor_route():
 @app.post("/api/clinic-search")
 def clinic_search_route():
     return jsonify(search_clinics(json_body()))
+
+
+@app.post("/api/import-search-html")
+def import_search_html_route():
+    return jsonify(parse_search_html(json_body()))
+
+
+@app.post("/api/scrape-directory")
+def scrape_directory_route():
+    return jsonify(scrape_clinic_directory(json_body()))
+
+
+@app.get("/api/run-discovery")
+def run_discovery_route():
+    secret = os.getenv("CRON_SECRET", "")
+    if secret and request.headers.get("Authorization", "") != f"Bearer {secret}":
+        return jsonify(ok=False, error="Unauthorized cron request"), 401
+    return jsonify(run_configured_discovery())
 
 
 @app.post("/api/generate-article")
