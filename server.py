@@ -389,6 +389,8 @@ def provider_status():
         "clinicSearchConfigured": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL") or os.getenv("BRAVE_SEARCH_API_KEY")),
         "geminiConfigured": bool(get_gemini_keys()),
         "scraperConfigured": bool(scraper_allowed_domains()),
+        "leadDatabaseConfigured": bool((os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")) or os.getenv("LEAD_DATABASE_WEBHOOK_URL") or os.getenv("LEAD_INGEST_WEBHOOK_URL")),
+        "leadDatabaseProvider": "supabase" if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY") else "webhook" if os.getenv("LEAD_DATABASE_WEBHOOK_URL") or os.getenv("LEAD_INGEST_WEBHOOK_URL") else "none",
         "geminiModel": os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"),
         "proposalPdfMode": "direct-download" if PILLOW_AVAILABLE else "browser-print",
         "pdfTextEngine": "raqm" if RAQM_AVAILABLE else "arabic-reshaper+bidi" if BIDI_FALLBACK_AVAILABLE else "basic",
@@ -1092,6 +1094,30 @@ def normalize_search_result_url(href: str, base_url: str = ""):
     return absolute.split("#", 1)[0]
 
 
+def clean_search_result_title(anchor):
+    heading = anchor.find(["h1", "h2", "h3"]) if hasattr(anchor, "find") else None
+    title = " ".join((heading or anchor).get_text(" ", strip=True).split())
+    title = re.sub(r"https?://\S+", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*[›»|]\s*.*$", "", title)
+    title = re.sub(r"\s{2,}", " ", title).strip(" -–—|›")
+    return title
+
+
+def classify_search_candidate(title: str, url: str):
+    combined = f"{title} {url}".lower()
+    list_terms = ("بهترین", "لیست", "معرفی", "10 ", "۱۰ ", "راهنما", "قیمت", "هزینه", "best-", "top-", "list-")
+    directory_terms = ("profile", "clinicdetail", "jobsearch", "/doctor", "/dr/", "directory")
+    medical_terms = ("کلینیک", "درمانگاه", "مرکز پزشکی", "دکتر", "پزشک", "clinic", "medical", "dermatology", "dental")
+    if any(term in combined for term in list_terms):
+        return "list-article", "Extract clinics from article before adding as leads"
+    if any(term in combined for term in directory_terms):
+        return "directory-profile", "Verify profile identity and resolve official website"
+    if any(term in combined for term in medical_terms):
+        return "clinic-candidate", "Verify license, address and public contact details"
+    return "web-result", "Review before adding as a clinic lead"
+
+
 def parse_search_html(payload: dict):
     html = str(payload.get("html", ""))
     if not html.strip():
@@ -1127,17 +1153,22 @@ def parse_search_html(payload: dict):
         url = normalize_search_result_url(anchor.get("href", ""), source_url)
         if not url or url in seen:
             continue
-        title = " ".join(anchor.get_text(" ", strip=True).split())
+        title = clean_search_result_title(anchor)
         if len(title) < 3:
             continue
         seen.add(url)
         container = anchor.find_parent(["article", "li", "div"]) or anchor.parent
         text = " ".join(container.get_text(" ", strip=True).split()) if container else title
+        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
         phone_match = re.search(r"(?:\+?98|0)?(?:21[-\s]?\d{5,8}|9\d{9})", text)
+        result_type, action = classify_search_candidate(title, url)
         items.append({"name": title[:180], "website": url[:500],
+                      "domain": (urlparse(url).hostname or "")[:200],
                       "phone": phone_match.group(0) if phone_match else "", "address": "",
                       "specialty": specialty, "source": source_url or url[:500],
-                      "summary": text[:600], "verified": False})
+                      "summary": text[:600], "resultType": result_type,
+                      "recommendedAction": action, "verified": False})
         if len(items) >= 50:
             break
 
@@ -1170,14 +1201,77 @@ def parse_search_html(payload: dict):
                 address = "، ".join(str(address.get(k, "")) for k in ("addressLocality", "streetAddress") if address.get(k))
             seen.add(key)
             items.append({"name": name[:180], "website": url[:500],
+                          "domain": (urlparse(url).hostname or "")[:200],
                           "phone": str(node.get("telephone", ""))[:100], "address": str(address)[:500],
                           "specialty": specialty, "source": source_url or url,
-                          "summary": str(node.get("description", ""))[:600], "verified": False})
+                          "summary": str(node.get("description", ""))[:600],
+                          "resultType": "structured-medical-entity",
+                          "recommendedAction": "Verify license and official ownership", "verified": False})
             if len(items) >= 50:
                 break
     return {"ok": True, "engine": engine, "items": items,
             "count": len(items),
             "disclaimer": "Imported search results are unverified candidates. Confirm identity, medical license and active public contact details."}
+
+
+def enrich_clinic_candidates(payload: dict):
+    candidates = payload.get("items") if isinstance(payload.get("items"), list) else []
+    specialty = str(payload.get("specialty", "medical clinic"))[:150]
+    if not candidates:
+        raise ValueError("At least one candidate is required for enrichment.")
+    enriched, errors, seen = [], [], set()
+    for candidate in candidates[:6]:
+        if not isinstance(candidate, dict):
+            continue
+        url = str(candidate.get("website", "")).strip()
+        if not url:
+            continue
+        ok, reason = public_url(url)
+        if not ok:
+            errors.append({"url": url[:500], "error": reason})
+            continue
+        if os.getenv("ENRICH_REQUIRE_ROBOTS", "false").lower() == "true" and not robots_allows(url):
+            errors.append({"url": url[:500], "error": "robots.txt did not allow enrichment"})
+            continue
+        try:
+            status, final_url, html, content_type, _ = fetch(url, timeout=15, limit=1_500_000)
+            if status != 200 or ("html" not in content_type.lower() and "<html" not in html[:1000].lower()):
+                raise ValueError(f"HTTP {status} or non-HTML response")
+            parsed = parse_search_html({"html": html, "engine": "generic", "sourceUrl": final_url,
+                                        "specialty": specialty}).get("items", [])
+            useful = []
+            for item in parsed:
+                kind = item.get("resultType")
+                if kind in {"clinic-candidate", "directory-profile", "structured-medical-entity"}:
+                    useful.append(item)
+            if useful:
+                for item in useful[:15]:
+                    key = item.get("website") or item.get("name")
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    item["parentSource"] = final_url
+                    item["enriched"] = True
+                    enriched.append(item)
+            else:
+                parser = AuditParser(final_url)
+                parser.feed(html)
+                name = str(candidate.get("name", "")).strip() or parser.title or (urlparse(final_url).hostname or "Clinic")
+                kind, action = classify_search_candidate(name, final_url)
+                key = final_url
+                if key not in seen:
+                    seen.add(key)
+                    enriched.append({"name": name[:180], "website": final_url[:500],
+                                     "domain": (urlparse(final_url).hostname or "")[:200],
+                                     "phone": next(iter(parser.phone_links), str(candidate.get("phone", "")))[:100],
+                                     "address": str(candidate.get("address", ""))[:500],
+                                     "specialty": specialty, "source": final_url,
+                                     "summary": parser.description[:600], "resultType": kind,
+                                     "recommendedAction": action, "verified": False, "enriched": True})
+        except Exception as exc:
+            errors.append({"url": url[:500], "error": str(exc)[:300]})
+    return {"ok": True, "items": enriched[:60], "count": len(enriched[:60]), "errors": errors,
+            "disclaimer": "Enrichment resolves public pages into unverified clinic candidates. Verify license, identity and public contact details before outreach."}
 
 
 def scraper_allowed_domains():
@@ -1252,16 +1346,74 @@ def run_configured_discovery():
                     all_items.append(item)
         except Exception as exc:
             errors.append({"url": url, "error": str(exc)[:300]})
-    ingest = os.getenv("LEAD_INGEST_WEBHOOK_URL", "")
     delivered = False
-    if ingest and all_items:
-        token = os.getenv("LEAD_INGEST_WEBHOOK_TOKEN", "")
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        post_json(ingest, {"source": "clinic-signal-cron", "items": all_items}, headers)
-        delivered = True
+    persistence = None
+    if all_items and (os.getenv("SUPABASE_URL") or os.getenv("LEAD_DATABASE_WEBHOOK_URL") or os.getenv("LEAD_INGEST_WEBHOOK_URL")):
+        try:
+            persistence = persist_leads_database(all_items)
+            delivered = True
+        except Exception as exc:
+            errors.append({"url": "database", "error": str(exc)[:300]})
     return {"ok": True, "skipped": False, "count": len(all_items), "items": all_items[:100],
-            "errors": errors, "deliveredToWebhook": delivered,
-            "warning": "Without LEAD_INGEST_WEBHOOK_URL, serverless cron results are not persisted."}
+            "errors": errors, "persisted": delivered, "persistence": persistence,
+            "warning": "Without Supabase or a lead database webhook, serverless cron results are not persisted."}
+
+
+def normalize_lead_row(item: dict):
+    website = str(item.get("website", "")).strip()[:500]
+    return {
+        "name": str(item.get("name", "Clinic candidate"))[:180],
+        "website": website,
+        "phone": str(item.get("phone", ""))[:100],
+        "address": str(item.get("address", item.get("area", "")))[:500],
+        "specialty": str(item.get("specialty", item.get("services", "")))[:180],
+        "source": str(item.get("source", ""))[:500],
+        "result_type": str(item.get("resultType", "candidate"))[:80],
+        "status": str(item.get("status", "new"))[:50],
+        "seo_score": int(item.get("seo", item.get("seoScore", 0)) or 0),
+        "opportunity_score": int(item.get("opportunity", item.get("opportunityScore", 0)) or 0),
+        "raw": item,
+    }
+
+
+def persist_leads_database(items: list[dict]):
+    rows = [normalize_lead_row(item) for item in items[:100] if isinstance(item, dict)]
+    rows = [row for row in rows if row["website"] or row["name"]]
+    if not rows:
+        raise ValueError("No valid lead rows were supplied.")
+    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    table = re.sub(r"[^a-zA-Z0-9_]", "", os.getenv("SUPABASE_LEADS_TABLE", "clinic_leads"))
+    if supabase_url and supabase_key:
+        endpoint = f"{supabase_url}/rest/v1/{table}?on_conflict=website"
+        response = requests.post(endpoint, headers={"apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}", "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=representation"}, json=rows, timeout=30)
+        if not response.ok:
+            raise ValueError(f"Supabase HTTP {response.status_code}: {response.text[:500]}")
+        data = response.json() if response.text else []
+        return {"ok": True, "provider": "supabase", "saved": len(rows), "items": data}
+    webhook = os.getenv("LEAD_DATABASE_WEBHOOK_URL", "") or os.getenv("LEAD_INGEST_WEBHOOK_URL", "")
+    if webhook:
+        token = os.getenv("LEAD_DATABASE_WEBHOOK_TOKEN", "") or os.getenv("LEAD_INGEST_WEBHOOK_TOKEN", "")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        status, data = post_json(webhook, {"source": "clinic-signal", "items": rows}, headers)
+        return {"ok": True, "provider": "webhook", "providerStatus": status, "saved": len(rows), "response": data}
+    raise ValueError("No lead database is configured. Add Supabase variables or LEAD_DATABASE_WEBHOOK_URL.")
+
+
+def fetch_leads_database(limit: int = 100):
+    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    table = re.sub(r"[^a-zA-Z0-9_]", "", os.getenv("SUPABASE_LEADS_TABLE", "clinic_leads"))
+    if not supabase_url or not supabase_key:
+        raise ValueError("Supabase lead database is not configured.")
+    endpoint = f"{supabase_url}/rest/v1/{table}?select=*&order=created_at.desc&limit={max(1,min(limit,500))}"
+    response = requests.get(endpoint, headers={"apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}"}, timeout=30)
+    if not response.ok:
+        raise ValueError(f"Supabase HTTP {response.status_code}: {response.text[:500]}")
+    return {"ok": True, "provider": "supabase", "items": response.json()}
 
 
 def make_proposal_pdf(payload: dict) -> tuple[bytes, str]:
@@ -1534,6 +1686,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json_response(provider_status())
         if path == "/api/send-log":
             return self.json_response({"ok": True, "items": list(SEND_LOG)})
+        if path == "/api/leads":
+            try:
+                return self.json_response(fetch_leads_database(int(parse_qs(urlparse(self.path).query).get("limit", ["100"])[0])))
+            except Exception as exc:
+                return self.json_response({"ok": False, "error": str(exc)}, 400)
         if path == "/api/run-discovery":
             secret = os.getenv("CRON_SECRET", "")
             if secret and self.headers.get("Authorization", "") != f"Bearer {secret}":
@@ -1562,11 +1719,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/audit", "/api/ai-seo-review", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/import-search-html", "/api/scrape-directory", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
+        if path not in {"/api/audit", "/api/ai-seo-review", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/import-search-html", "/api/enrich-clinics", "/api/scrape-directory", "/api/leads/bulk", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
             return self.json_response({"ok": False, "error": "Not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/proposal-link", "/api/send", "/api/import-search-html"} else 30_000
+            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/proposal-link", "/api/send", "/api/import-search-html", "/api/enrich-clinics", "/api/leads/bulk"} else 30_000
             if length <= 0 or length > request_limit:
                 raise ValueError("Invalid request size")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1595,8 +1752,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_response(search_clinics(payload))
             if path == "/api/import-search-html":
                 return self.json_response(parse_search_html(payload))
+            if path == "/api/enrich-clinics":
+                return self.json_response(enrich_clinic_candidates(payload))
             if path == "/api/scrape-directory":
                 return self.json_response(scrape_clinic_directory(payload))
+            if path == "/api/leads/bulk":
+                items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                return self.json_response(persist_leads_database(items))
             if path == "/api/generate-article":
                 return self.json_response(generate_seo_article(payload))
             url = str(payload.get("url", "")).strip()
@@ -1611,7 +1773,9 @@ class Handler(SimpleHTTPRequestHandler):
                      "Vendor search" if path == "/api/vendor-search" else
                      "Clinic search" if path == "/api/clinic-search" else
                      "Search HTML import" if path == "/api/import-search-html" else
+                     "Clinic enrichment" if path == "/api/enrich-clinics" else
                      "Directory scraper" if path == "/api/scrape-directory" else
+                     "Lead database" if path == "/api/leads/bulk" else
                      "Article generation" if path == "/api/generate-article" else
                      "Proposal PDF" if path in {"/api/proposal-pdf", "/api/proposal-link"} else "Audit")
             return self.json_response({"ok": False, "error": f"{label} failed: {type(exc).__name__}: {exc}"}, 500)

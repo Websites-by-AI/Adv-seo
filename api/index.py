@@ -28,8 +28,11 @@ from server import (  # noqa: E402
     search_vendors,
     search_clinics,
     parse_search_html,
+    enrich_clinic_candidates,
     scrape_clinic_directory,
     run_configured_discovery,
+    persist_leads_database,
+    fetch_leads_database,
     send_message,
 )
 
@@ -149,9 +152,26 @@ def import_search_html_route():
     return jsonify(parse_search_html(json_body()))
 
 
+@app.post("/api/enrich-clinics")
+def enrich_clinics_route():
+    return jsonify(enrich_clinic_candidates(json_body()))
+
+
 @app.post("/api/scrape-directory")
 def scrape_directory_route():
     return jsonify(scrape_clinic_directory(json_body()))
+
+
+@app.get("/api/leads")
+def database_leads_route():
+    return jsonify(fetch_leads_database(int(request.args.get("limit", "100"))))
+
+
+@app.post("/api/leads/bulk")
+def database_leads_bulk_route():
+    data = json_body()
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    return jsonify(persist_leads_database(items))
 
 
 @app.get("/api/run-discovery")

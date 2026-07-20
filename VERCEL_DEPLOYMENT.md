@@ -60,7 +60,12 @@ CLINIC_DISCOVERY_URLS=https://approved-directory.example/clinics
 CRON_SECRET=LONG_RANDOM_SECRET
 LEAD_INGEST_WEBHOOK_URL=https://your-storage-adapter.example/leads
 LEAD_INGEST_WEBHOOK_TOKEN=SECRET
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=SECRET
+SUPABASE_LEADS_TABLE=clinic_leads
 ```
+
+Run `SUPABASE_SETUP.sql` once in the Supabase SQL Editor before enabling database buttons.
 
 Generate a secret locally:
 
