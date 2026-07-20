@@ -95,6 +95,11 @@ def main():
         assert vendor_search["configured"] is False and "google" in vendor_search["searchLinks"]
         print("PASS safe vendor-search fallback")
 
+        status, clinic_search = post("/api/clinic-search", {"query": "کلینیک پزشکی سلامت جنسی سکسولوژی تهران سایت رسمی", "location": "تهران", "specialty": "sexual-health", "engines": ["duckduckgo", "google", "bing", "brave"]})
+        assert status == 200 and clinic_search["ok"] is True and clinic_search["configured"] is False
+        assert {"duckduckgo", "google", "bing", "brave"}.issubset(clinic_search["searchLinks"])
+        print("PASS multi-engine medical-clinic search fallback")
+
         if integrations.get("proposalPdfMode") == "direct-download":
             status, content_type, pdf = post_raw("/api/proposal-pdf", {
                 "agency": "Clinic Signal Partner", "agencyProfile": {"name": "سئوف", "phone": "02166902605", "website": "https://seof.ir", "email": "info@seof.ir", "address": "تهران، خیابان جمالزاده جنوبی", "hours": "شنبه تا چهارشنبه", "logoData": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n3sAAAAASUVORK5CYII="}, "validity": "14 days", "setup": "35M", "monthly": "45M", "media": "12M", "duration": "9 months",

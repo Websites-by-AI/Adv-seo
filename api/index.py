@@ -24,6 +24,7 @@ from server import (  # noqa: E402
     make_proposal_pdf,
     provider_status,
     search_vendors,
+    search_clinics,
     send_message,
 )
 
@@ -126,6 +127,11 @@ def audit_route():
 @app.post("/api/vendor-search")
 def vendor_route():
     return jsonify(search_vendors(json_body()))
+
+
+@app.post("/api/clinic-search")
+def clinic_search_route():
+    return jsonify(search_clinics(json_body()))
 
 
 @app.post("/api/send")

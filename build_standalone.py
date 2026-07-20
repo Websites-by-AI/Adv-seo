@@ -9,6 +9,7 @@ source = (ROOT / "index.source.html").read_text(encoding="utf-8")
 css = "\n".join([
     (ROOT / "static/styles.css").read_text(encoding="utf-8"),
     (ROOT / "static/mobile-fixes.css").read_text(encoding="utf-8"),
+    (ROOT / "static/discovery.css").read_text(encoding="utf-8"),
 ])
 js = (ROOT / "static/app.js").read_text(encoding="utf-8")
 # Raw inline scripts are the most compatible option for file://, workspace previews,
@@ -16,7 +17,7 @@ js = (ROOT / "static/app.js").read_text(encoding="utf-8")
 js = js.replace("</script", "<\\/script")
 
 source = source.replace(
-    '<link rel="stylesheet" href="static/styles.css">\n<link rel="stylesheet" href="static/mobile-fixes.css">',
+    '<link rel="stylesheet" href="static/styles.css">\n<link rel="stylesheet" href="static/mobile-fixes.css">\n<link rel="stylesheet" href="static/discovery.css">',
     f"<style>\n{css}\n</style>",
 )
 source = source.replace(

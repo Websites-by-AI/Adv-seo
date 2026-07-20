@@ -80,6 +80,13 @@ export DIVAR_APP_SLUG='your_approved_app_slug'
 # Optional public-company search adapter. It must return {"items": [...]}
 export VENDOR_SEARCH_WEBHOOK_URL='https://search-adapter.example/vendors'
 export VENDOR_SEARCH_WEBHOOK_TOKEN='...'
+
+# Optional medical-clinic discovery adapter
+export CLINIC_SEARCH_WEBHOOK_URL='https://search-adapter.example/clinics'
+export CLINIC_SEARCH_WEBHOOK_TOKEN='...'
+
+# Or use Brave Search API directly
+export BRAVE_SEARCH_API_KEY='...'
 ```
 
 WhatsApp opt-in and template/session rules apply. A Telegram user must start the bot first. Divar scraping or browser automation is intentionally not implemented.
@@ -126,7 +133,8 @@ clinic-lead-agent/
 ├── static/
 │   ├── app.js                 # UI, scoring, proposals, partners and messaging
 │   ├── styles.css             # Core dashboard styles
-│   └── mobile-fixes.css       # Safe-area, phone, tablet and landscape fixes
+│   ├── mobile-fixes.css       # Safe-area, phone, tablet and landscape fixes
+│   └── discovery.css          # Medical-specialty and search-engine discovery UI
 ├── public/index.html          # Vercel static frontend bundle
 ├── api/index.py               # Vercel Flask serverless API
 ├── assets/fonts/              # Bundled DejaVu fonts for Persian PDF
@@ -147,15 +155,16 @@ clinic-lead-agent/
 1. **Public home page** — product positioning, workflow, feature overview and calls to action.
 2. **Operations dashboard** — KPIs, urgent incidents, opportunity ranking and public-scale distribution.
 3. **Lead database** — 19 seed leads, filters, search, local persistence, import/export and detailed lead drawer.
-4. **Audit agent** — HTTP status, redirects, title, description, H1, canonical, viewport, JSON-LD, internal links, robots and sitemap.
-5. **Scoring engine** — editable SEO-gap/public-scale weighting, priority P1–P3 and crisis override.
-6. **Package engine** — Local Starter, Regional Growth, Tehran Enterprise and technical-recovery add-ons.
-7. **Sender-company dashboard** — Seof is the default profile, with Tehran Site, SEO Tehran and DMRoom as additional public templates; contact fields and authorized logo upload are editable.
-8. **Proposal/PDF studio** — clinic-specific audit, 90-day scope, pricing, KPIs, sender logo/contact block and legal terms; direct PDF plus browser-print fallback.
-9. **Solution Partner Finder** — classifies the issue, recommends SEO/design/security/hosting/content/branding providers, matches an evidence-based vendor registry and supports a search adapter.
-10. **Messaging center** — WhatsApp Mobile/Web/API, Telegram, Bale, Rubika, Soroush Plus, Eitaa, SMTP email, SMS and Kenar-e-Divar chat API/web handoff.
-11. **Controlled automation** — local queue, scheduled items while the panel is open, dry-run mode, rate limits and hashed send logs.
-12. **Compliance controls** — public business contacts only; consent and human approval required; no guaranteed Google rank, treatment result or unsupported revenue claim.
+4. **Medical Clinic Discovery** — specialty templates, DuckDuckGo/Google/Bing/Brave links and an optional normalized search adapter.
+5. **Audit agent** — HTTP status, redirects, title, description, H1, canonical, viewport, JSON-LD, internal links, robots and sitemap.
+6. **Scoring engine** — editable SEO-gap/public-scale weighting, priority P1–P3 and crisis override.
+7. **Package engine** — Local Starter, Regional Growth, Tehran Enterprise and technical-recovery add-ons.
+8. **Sender-company dashboard** — Seof is the default profile, with Tehran Site, SEO Tehran and DMRoom as additional public templates; contact fields and authorized logo upload are editable.
+9. **Proposal/PDF studio** — clinic-specific audit, 90-day scope, pricing, KPIs, sender logo/contact block and legal terms; direct PDF plus browser-print fallback.
+10. **Solution Partner Finder** — classifies the issue, recommends SEO/design/security/hosting/content/branding providers, matches an evidence-based vendor registry and supports a search adapter.
+11. **Messaging center** — WhatsApp Mobile/Web/API, Telegram, Bale, Rubika, Soroush Plus, Eitaa, SMTP email, SMS and Kenar-e-Divar chat API/web handoff.
+12. **Controlled automation** — local queue, scheduled items while the panel is open, dry-run mode, rate limits and hashed send logs.
+13. **Compliance controls** — public business contacts only; consent and human approval required; no guaranteed Google rank, treatment result or unsupported revenue claim.
 
 ## Architecture
 

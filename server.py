@@ -20,7 +20,7 @@ from io import BytesIO
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent
@@ -344,6 +344,7 @@ def provider_status():
         "dryRun": DRY_RUN,
         "providers": providers,
         "vendorSearchConfigured": bool(os.getenv("VENDOR_SEARCH_WEBHOOK_URL")),
+        "clinicSearchConfigured": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL") or os.getenv("BRAVE_SEARCH_API_KEY")),
         "proposalPdfMode": "direct-download" if PILLOW_AVAILABLE else "browser-print",
         "pdfLinkTtlSeconds": PDF_LINK_TTL,
         "pdfLinksEphemeral": True,
@@ -401,6 +402,21 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
     except HTTPError as exc:
         raw = exc.read(200_000).decode("utf-8", errors="replace")
         raise ValueError(f"Provider HTTP {exc.code}: {raw[:500]}")
+
+
+def get_json(url: str, headers: dict | None = None, timeout: int = 20):
+    hdr = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if headers:
+        hdr.update(headers)
+    req = Request(url, headers=hdr, method="GET")
+    opener = build_opener(SafeRedirect())
+    try:
+        with opener.open(req, timeout=timeout) as response:
+            raw = response.read(1_000_000).decode("utf-8", errors="replace")
+            return int(response.status), json.loads(raw)
+    except HTTPError as exc:
+        raw = exc.read(200_000).decode("utf-8", errors="replace")
+        raise ValueError(f"Search provider HTTP {exc.code}: {raw[:500]}")
 
 
 def post_multipart(url: str, fields: dict, file_field: str, filename: str, content_type: str,
@@ -634,6 +650,77 @@ def search_vendors(payload: dict):
             "linkedin": "https://www.linkedin.com/search/results/companies/?keywords=" + quote_plus(text),
         },
         "disclaimer": "No search adapter is configured. Use the generated public-search links or add candidates manually.",
+    }
+
+
+def search_clinics(payload: dict):
+    """Search adapter for public medical-clinic discovery; never collects patient data."""
+    query = str(payload.get("query", "")).strip()[:350]
+    location = str(payload.get("location", "Tehran")).strip()[:120]
+    specialty = str(payload.get("specialty", "medical clinic")).strip()[:120]
+    engines = payload.get("engines") if isinstance(payload.get("engines"), list) else []
+    engines = [str(x).lower()[:30] for x in engines[:8]]
+    if not query:
+        query = f"{specialty} {location} official website contact"
+    combined = f"{query} {location}".strip()
+    webhook = os.getenv("CLINIC_SEARCH_WEBHOOK_URL", "")
+    token = os.getenv("CLINIC_SEARCH_WEBHOOK_TOKEN", "")
+    if webhook:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        status, response = post_json(webhook, {
+            "query": query, "location": location, "specialty": specialty,
+            "engines": engines, "limit": 20, "publicBusinessOnly": True,
+        }, headers)
+        source_items = response.get("items", []) if isinstance(response, dict) else []
+        items = []
+        for item in source_items[:20]:
+            if not isinstance(item, dict):
+                continue
+            items.append({
+                "name": str(item.get("name", ""))[:180],
+                "website": str(item.get("website", ""))[:500],
+                "phone": str(item.get("phone", ""))[:100],
+                "address": str(item.get("address", ""))[:500],
+                "specialty": str(item.get("specialty", specialty))[:150],
+                "source": str(item.get("source", item.get("evidence", "")))[:500],
+                "summary": str(item.get("summary", ""))[:600],
+                "verified": bool(item.get("verified", False)),
+            })
+        return {"ok": True, "configured": True, "providerStatus": status, "items": items,
+                "disclaimer": "Candidates only. Verify medical license, identity, public contact details and active status independently."}
+    brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "")
+    if brave_key:
+        params = urlencode({"q": combined, "count": 20, "search_lang": "fa", "safesearch": "strict"})
+        status, response = get_json("https://api.search.brave.com/res/v1/web/search?" + params,
+                                    {"X-Subscription-Token": brave_key})
+        results = ((response.get("web") or {}).get("results") or []) if isinstance(response, dict) else []
+        items = []
+        for result in results[:20]:
+            if not isinstance(result, dict):
+                continue
+            items.append({"name": str(result.get("title", ""))[:180],
+                          "website": str(result.get("url", ""))[:500],
+                          "phone": "", "address": "", "specialty": specialty,
+                          "source": str(result.get("url", ""))[:500],
+                          "summary": str(result.get("description", ""))[:600],
+                          "verified": False})
+        return {"ok": True, "configured": True, "provider": "brave", "providerStatus": status,
+                "items": items,
+                "disclaimer": "Brave web results are discovery candidates, not verified medical providers. Confirm license, identity and public contact information."}
+    encoded = quote_plus(combined)
+    directory_query = quote_plus(f"site:paziresh24.com OR site:nobat.ir {combined}")
+    return {
+        "ok": True,
+        "configured": False,
+        "items": [],
+        "searchLinks": {
+            "duckduckgo": "https://duckduckgo.com/?q=" + encoded,
+            "google": "https://www.google.com/search?q=" + encoded,
+            "bing": "https://www.bing.com/search?q=" + encoded,
+            "brave": "https://search.brave.com/search?q=" + encoded,
+            "medicalDirectories": "https://www.google.com/search?q=" + directory_query,
+        },
+        "disclaimer": "No clinic-search adapter is configured. Links search public business information only; do not collect patient data or infer sensitive traits.",
     }
 
 
@@ -908,7 +995,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/audit", "/api/send", "/api/vendor-search", "/api/proposal-pdf", "/api/proposal-link"}:
+        if path not in {"/api/audit", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/proposal-pdf", "/api/proposal-link"}:
             return self.json_response({"ok": False, "error": "Not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -935,6 +1022,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_response(send_message(payload))
             if path == "/api/vendor-search":
                 return self.json_response(search_vendors(payload))
+            if path == "/api/clinic-search":
+                return self.json_response(search_clinics(payload))
             url = str(payload.get("url", "")).strip()
             if not url:
                 raise ValueError("URL is required")
@@ -942,7 +1031,10 @@ class Handler(SimpleHTTPRequestHandler):
         except (ValueError, URLError, HTTPError, socket.timeout, TimeoutError) as exc:
             return self.json_response({"ok": False, "error": str(exc), "type": type(exc).__name__}, 400)
         except Exception as exc:
-            label = "Send" if path == "/api/send" else "Vendor search" if path == "/api/vendor-search" else "Proposal PDF" if path in {"/api/proposal-pdf", "/api/proposal-link"} else "Audit"
+            label = ("Send" if path == "/api/send" else
+                     "Vendor search" if path == "/api/vendor-search" else
+                     "Clinic search" if path == "/api/clinic-search" else
+                     "Proposal PDF" if path in {"/api/proposal-pdf", "/api/proposal-link"} else "Audit")
             return self.json_response({"ok": False, "error": f"{label} failed: {type(exc).__name__}: {exc}"}, 500)
 
 

@@ -46,6 +46,10 @@ DRY_RUN=true
 PDF_LINK_SECRET=generate-a-long-random-secret-at-least-32-characters
 PUBLIC_BASE_URL=https://YOUR-PROJECT.vercel.app
 PDF_LINK_TTL_SECONDS=86400
+CLINIC_SEARCH_WEBHOOK_URL=https://YOUR-SEARCH-ADAPTER.example/clinics
+CLINIC_SEARCH_WEBHOOK_TOKEN=SECRET
+# Alternative direct provider:
+BRAVE_SEARCH_API_KEY=SECRET
 ```
 
 Generate a secret locally:

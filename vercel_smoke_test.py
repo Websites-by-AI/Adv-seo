@@ -19,6 +19,10 @@ r = client.get("/api/integrations")
 assert r.status_code == 200 and r.json["deployment"] == "vercel"
 print("PASS Vercel integrations")
 
+r = client.post("/api/clinic-search", json={"query": "sexual health medical clinic Tehran", "location": "Tehran", "specialty": "sexual-health", "engines": ["duckduckgo", "google"]})
+assert r.status_code == 200 and "duckduckgo" in r.json["searchLinks"]
+print("PASS Vercel medical-clinic discovery fallback")
+
 proposal = {
     "agency": "سئوف",
     "agencyProfile": {"name": "سئوف", "phone": "02166902605", "website": "https://seof.ir"},

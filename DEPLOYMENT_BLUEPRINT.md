@@ -64,7 +64,8 @@ Candidate URLs / JSON ────► │ Browser operations UI   │
 | `/api/proposal-pdf` | POST | Direct Persian PDF generation |
 | `/api/proposal-link` | POST | Create a temporary shareable PDF URL |
 | `/p/{token}.pdf` | GET | View/download a temporary proposal |
-| `/api/vendor-search` | POST | Optional vendor-search adapter/fallback links |
+| `/api/vendor-search` | POST | Optional solution-provider search adapter/fallback links |
+| `/api/clinic-search` | POST | Medical-specialty discovery and multi-engine fallback links |
 | `/api/send` | POST | Approved, consent-controlled delivery |
 | `/api/send-log` | GET | Recent hashed delivery events |
 
@@ -152,6 +153,7 @@ PDF_LINK_LIMIT=100
 | SMS | `SMS_WEBHOOK_URL`, optional `SMS_WEBHOOK_TOKEN`, `SMS_SENDER` |
 | Divar Chat | `DIVAR_PARTNER_WEBHOOK_URL`, `DIVAR_PARTNER_TOKEN`, `DIVAR_APP_SLUG` |
 | Vendor search | `VENDOR_SEARCH_WEBHOOK_URL`, optional `VENDOR_SEARCH_WEBHOOK_TOKEN` |
+| Clinic discovery | `CLINIC_SEARCH_WEBHOOK_URL` + token, or `BRAVE_SEARCH_API_KEY` |
 
 After testing each provider in its own sandbox, enable real delivery:
 
