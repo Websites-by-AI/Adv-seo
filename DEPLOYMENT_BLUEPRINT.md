@@ -15,19 +15,17 @@ It is not a bulk-spam tool. Message delivery requires:
 
 ## 2. Repaired frontend structure
 
-The project has two entry experiences. `index.html` is a static, JavaScript-free Arena preview so code can never appear as page text. The maintainable full application is split into HTML, CSS and JavaScript; the build produces `app.html` for local/Docker use and `public/index.html` for Vercel.
+Application code is no longer embedded inside the HTML document. This prevents a failed or partially parsed template literal from becoming visible as page text.
 
 ```text
-index.source.html + static/styles.css + static/mobile-fixes.css + static/app.js
-                              │
-                              ▼
-                    build_standalone.py
-                              │
-                              ▼
-       app.html + public/index.html (full application bundles)
+Browser
+  │
+  ├── GET /index.html          clean semantic HTML only
+  ├── GET /static/styles.css   presentation only
+  └── GET /static/app.js       application logic only
 ```
 
-The build embeds validated CSS and JavaScript into the full application bundles, so Vercel static hosting, local use and Docker do not depend on relative asset loading. The maintainable source files remain separate. The build verifies that there is exactly one script block and escapes any possible closing-script sequence. A visible fatal-error banner is shown if startup or an unhandled promise fails.
+The server adds a Content Security Policy that permits scripts only from the same origin. A visible fatal-error banner is shown if startup or an unhandled promise fails.
 
 A **Repair local cache** action normalizes saved data. **Full reset** removes all `clinicSignal*` LocalStorage keys and reloads healthy seed data.
 
@@ -62,10 +60,7 @@ Candidate URLs / JSON ────► │ Browser operations UI   │
 | `/api/integrations` | GET | Provider configuration state without secrets |
 | `/api/audit` | POST | Safe public website audit |
 | `/api/proposal-pdf` | POST | Direct Persian PDF generation |
-| `/api/proposal-link` | POST | Create a temporary shareable PDF URL |
-| `/p/{token}.pdf` | GET | View/download a temporary proposal |
-| `/api/vendor-search` | POST | Optional solution-provider search adapter/fallback links |
-| `/api/clinic-search` | POST | Medical-specialty discovery and multi-engine fallback links |
+| `/api/vendor-search` | POST | Optional vendor-search adapter/fallback links |
 | `/api/send` | POST | Approved, consent-controlled delivery |
 | `/api/send-log` | GET | Recent hashed delivery events |
 
@@ -132,12 +127,7 @@ Keep sending disabled until every provider has been reviewed:
 ```text
 SEND_ENABLED=false
 DRY_RUN=true
-PUBLIC_BASE_URL=https://YOUR_USERNAME-clinic-signal.hf.space
-PDF_LINK_TTL_SECONDS=86400
-PDF_LINK_LIMIT=100
 ```
-
-`PUBLIC_BASE_URL` makes generated WhatsApp/PDF links use the public Space URL instead of an internal proxy hostname.
 
 ### Messaging secrets
 
@@ -153,7 +143,6 @@ PDF_LINK_LIMIT=100
 | SMS | `SMS_WEBHOOK_URL`, optional `SMS_WEBHOOK_TOKEN`, `SMS_SENDER` |
 | Divar Chat | `DIVAR_PARTNER_WEBHOOK_URL`, `DIVAR_PARTNER_TOKEN`, `DIVAR_APP_SLUG` |
 | Vendor search | `VENDOR_SEARCH_WEBHOOK_URL`, optional `VENDOR_SEARCH_WEBHOOK_TOKEN` |
-| Clinic discovery | `CLINIC_SEARCH_WEBHOOK_URL` + token, or `BRAVE_SEARCH_API_KEY` |
 
 After testing each provider in its own sandbox, enable real delivery:
 
@@ -173,11 +162,6 @@ Never place these values in `index.html`, `static/app.js`, Git commits or public
 - WhatsApp Cloud API, Telegram, Bale and SMTP email can receive the generated document automatically.
 - Rubika, Soroush Plus, Eitaa and manual web handoffs download the PDF first unless a reviewed file-upload adapter exists.
 - Browser web links cannot silently attach a local file.
-- **Build PDF link** creates an unguessable temporary URL and adds it to the WhatsApp message automatically.
-- Temporary PDF URLs default to 24 hours, return `X-Robots-Tag: noindex`, and expire from memory.
-- On a free Space, sleeping or rebuilding the container invalidates temporary links before their nominal expiry.
-
-For durable proposal URLs, upload the generated file to private/object storage and return a signed expiring URL.
 
 For best direct-PDF results, upload an authorized PNG, JPEG or WebP logo. SVG remains available in browser Print/PDF mode.
 
@@ -238,7 +222,6 @@ Run:
 
 ```bash
 cd clinic-lead-agent
-python build_standalone.py
 python smoke_test.py
 node --check static/app.js
 python -m py_compile server.py smoke_test.py

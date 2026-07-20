@@ -6,14 +6,10 @@ import base64
 import hashlib
 import ipaddress
 import json
-import math
 import os
 import re
-import secrets
 import smtplib
 import socket
-
-import requests
 import ssl
 import time
 from collections import defaultdict, deque
@@ -23,7 +19,7 @@ from io import BytesIO
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus, urlencode, urljoin, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent
@@ -33,9 +29,6 @@ SEND_ENABLED = os.getenv("SEND_ENABLED", "false").lower() == "true"
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() != "false"
 SEND_LOG: deque[dict] = deque(maxlen=100)
 RATE_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
-PDF_LINKS: dict[str, dict] = {}
-PDF_LINK_TTL = max(300, min(int(os.getenv("PDF_LINK_TTL_SECONDS", "86400")), 604800))
-PDF_LINK_LIMIT = max(10, min(int(os.getenv("PDF_LINK_LIMIT", "100")), 500))
 ALLOWED_CHANNELS = {"whatsapp", "telegram", "bale", "rubika", "soroush", "eitaa", "email", "sms", "divar"}
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -347,12 +340,7 @@ def provider_status():
         "dryRun": DRY_RUN,
         "providers": providers,
         "vendorSearchConfigured": bool(os.getenv("VENDOR_SEARCH_WEBHOOK_URL")),
-        "clinicSearchConfigured": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL") or os.getenv("BRAVE_SEARCH_API_KEY")),
-        "geminiConfigured": bool(get_gemini_keys()),
-        "geminiModel": os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest"),
         "proposalPdfMode": "direct-download" if PILLOW_AVAILABLE else "browser-print",
-        "pdfLinkTtlSeconds": PDF_LINK_TTL,
-        "pdfLinksEphemeral": True,
         "webApps": {
             "bale": "https://web.bale.ai",
             "rubika": "https://web.rubika.ir",
@@ -389,192 +377,6 @@ def rate_limit(channel: str, recipient: str):
         RATE_BUCKETS[key].append(now)
 
 
-def get_gemini_keys():
-    keys = []
-    for index in range(1, 4):
-        value = os.getenv(f"GEMINI_API_KEY{index}", "").strip()
-        if value and value not in keys:
-            keys.append(value)
-    fallback = os.getenv("GEMINI_API_KEY", "").strip()
-    if fallback and fallback not in keys:
-        keys.append(fallback)
-    return keys
-
-
-def call_gemini(prompt: str, temperature: float = 0.65, max_tokens: int = 12000):
-    keys = get_gemini_keys()
-    if not keys:
-        raise ValueError("No Gemini API key is configured. Add GEMINI_API_KEY1 or GEMINI_API_KEY.")
-    model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest").strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    config = {"maxOutputTokens": max(1000, min(max_tokens, 16000)), "temperature": temperature}
-    if os.getenv("GEMINI_USE_THINKING", "false").lower() == "true":
-        config["thinkingConfig"] = {"thinkingLevel": "low"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config}
-    errors = []
-    for number, key in enumerate(keys, 1):
-        try:
-            response = requests.post(url, headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                                     json=payload, timeout=120)
-            data = response.json() if response.text else {}
-            if not response.ok:
-                error = data.get("error", {}) if isinstance(data, dict) else {}
-                status = str(error.get("status", ""))
-                message = str(error.get("message", response.text or "Unknown Gemini error"))
-                if response.status_code == 429 or status == "RESOURCE_EXHAUSTED" or "quota" in message.lower():
-                    errors.append(f"key {number}: quota exhausted")
-                    continue
-                raise ValueError(f"Gemini API: {message[:500]}")
-            candidates = data.get("candidates") or []
-            if not candidates:
-                raise ValueError("Gemini returned no candidate.")
-            parts = ((candidates[0].get("content") or {}).get("parts") or [])
-            text = "\n".join(str(part.get("text", "")) for part in parts
-                             if isinstance(part, dict) and not part.get("thought") and part.get("text"))
-            if not text.strip():
-                raise ValueError("Gemini returned an empty article.")
-            return text.strip(), number, model
-        except requests.RequestException as exc:
-            errors.append(f"key {number}: {type(exc).__name__}")
-            continue
-    raise ValueError("All Gemini keys failed or reached quota: " + "; ".join(errors))
-
-
-def split_seo_keywords(raw: str):
-    return [item.strip() for item in re.split(r"،|,|\s+-\s+", raw or "") if item.strip()][:12]
-
-
-def keyword_occurrences(text: str, keyword: str):
-    if not keyword:
-        return 0
-    return len(re.findall(re.escape(keyword), text, flags=re.IGNORECASE))
-
-
-def build_article_prompt(data: dict, target: int, secondary: list[str], min_primary: int, max_primary: int,
-                         min_secondary: int):
-    language = data["language"]
-    title = data["title"]
-    outline = data["outline"]
-    primary = data["primaryKeyword"]
-    secondary_text = "، ".join(secondary) if secondary else "ندارد"
-    rewrite = data.get("isRewrite") is True
-    notes = str(data.get("rewriteNotes", "")).strip()[:1000]
-    if language == "en":
-        prompt = f"""You are a senior human SEO editor. Write a useful, natural, publication-ready article in English.
-
-Title: {title}
-Primary keyword: {primary}
-Secondary keywords: {', '.join(secondary) if secondary else 'none'}
-Required H2 outline (use every line exactly, in this exact order, without adding or rewriting headings):
-{outline}
-
-Requirements:
-- Target {target} words, tolerance ±30 words.
-- Use the exact primary keyword {min_primary} to {max_primary} times, naturally distributed, including once in the first 100 words.
-- Use each secondary keyword at least {min_secondary} times when contextually relevant; never stuff keywords.
-- After the introduction, add an H2 named exactly “Quick overview 👀”, two short sentences and a bullet list.
-- For each supplied H2: a short introduction, useful main content, and a natural transition. Use H3 only where the H2 contains multiple distinct ideas.
-- Prefer active voice, direct reader address, specific examples and practical guidance.
-- Do not invent statistics, medical claims, certifications, prices, testimonials or sources.
-- For medical topics, provide general educational information, avoid diagnosis or treatment promises, and add a short “Medical review required” note.
-- Do not output an SEO report, analysis, preface, or code fence. Output only the article in Markdown.
-"""
-    else:
-        prompt = f"""تو یک ویراستار حرفه‌ای و انسانی سئو هستی. یک مقاله کاربردی، طبیعی و آماده انتشار به زبان فارسی معیار بنویس.
-
-عنوان: {title}
-کلمه کلیدی اصلی: {primary}
-کلمات کلیدی فرعی: {secondary_text}
-Outline اجباری H2 (هر خط را دقیقاً با همین متن و همین ترتیب استفاده کن و عنوانی را تغییر نده):
-{outline}
-
-قواعد:
-- طول هدف {target} کلمه با تلورانس حداکثر ±۳۰ کلمه.
-- عبارت دقیق «{primary}» را بین {min_primary} تا {max_primary} بار، طبیعی و توزیع‌شده استفاده کن و یک بار در ۱۰۰ کلمه اول بیاور.
-- هر کلمه فرعی مرتبط را حداقل {min_secondary} بار طبیعی استفاده کن؛ حشو کلمه ممنوع است.
-- بعد از مقدمه یک H2 با عنوان دقیق «نگاه سریع 👀» شامل دو جمله کوتاه و یک فهرست نقطه‌ای اضافه کن.
-- برای هر H2 داده‌شده: مقدمه کوتاه، محتوای ارزشمند و گذار طبیعی. فقط برای چند ایده مستقل H3 بساز.
-- از لحن مستقیم، فعل معلوم، مثال مشخص و راهکار عملی استفاده کن.
-- آمار، ادعای پزشکی، مجوز، قیمت، رضایت مشتری یا منبع ساختگی تولید نکن.
-- در موضوعات پزشکی فقط اطلاعات آموزشی عمومی بده، تشخیص یا وعده درمان ارائه نکن و در پایان یادداشت کوتاه «نیازمند بازبینی پزشک» اضافه کن.
-- گزارش سئو، توضیح فرایند، مقدمه خارج از مقاله یا code fence تولید نکن. فقط مقاله Markdown را برگردان.
-"""
-    if rewrite:
-        prompt += (f"\nRewrite the article from scratch with a substantially different expression. Address this note: {notes or 'Improve clarity and naturalness'}.\n"
-                   if language == "en" else
-                   f"\nمقاله را از ابتدا با بیان کاملاً متفاوت بازنویسی کن و این ملاحظه را اعمال کن: {notes or 'شفافیت و طبیعی‌بودن متن بهتر شود'}.\n")
-    return prompt
-
-
-def article_report(article: str, data: dict, target: int, secondary: list[str]):
-    words = [word for word in article.split() if word]
-    word_count = len(words)
-    primary = data["primaryKeyword"]
-    primary_count = keyword_occurrences(article, primary)
-    min_primary = math.ceil(max(word_count, 1) * 0.01)
-    max_primary = max(min_primary, math.floor(max(word_count, 1) * 0.015))
-    first_100 = " ".join(words[:100])
-    report = {
-        "wordCount": word_count,
-        "targetWordCount": target,
-        "wordCountPass": abs(word_count - target) <= 30,
-        "primaryKeyword": primary,
-        "primaryCount": primary_count,
-        "primaryMin": min_primary,
-        "primaryMax": max_primary,
-        "density": round(primary_count / max(word_count, 1) * 100, 2),
-        "primaryInFirst100": keyword_occurrences(first_100, primary) > 0,
-        "secondary": [{"keyword": keyword, "count": keyword_occurrences(article, keyword)} for keyword in secondary],
-    }
-    return report
-
-
-def generate_seo_article(payload: dict):
-    language = str(payload.get("language", "fa")).lower()
-    language = "en" if language == "en" else "fa"
-    data = {
-        "language": language,
-        "title": str(payload.get("title", "")).strip()[:300],
-        "outline": str(payload.get("outline", "")).strip()[:5000],
-        "primaryKeyword": str(payload.get("primaryKeyword", "")).strip()[:250],
-        "isRewrite": payload.get("isRewrite") is True,
-        "rewriteNotes": str(payload.get("rewriteNotes", "")).strip()[:1000],
-    }
-    if not data["title"] or not data["outline"] or not data["primaryKeyword"]:
-        raise ValueError("Title, outline and primary keyword are required.")
-    try:
-        target = int(payload.get("targetWordCount", 900))
-    except (TypeError, ValueError):
-        target = 900
-    target = max(800, min(target, 1500))
-    secondary = split_seo_keywords(str(payload.get("secondaryKeywords", "")))
-    min_primary = math.ceil(target * 0.01)
-    max_primary = max(min_primary, math.floor(target * 0.015))
-    min_secondary = max(2, round(target / 900 * 3))
-    prompt = build_article_prompt(data, target, secondary, min_primary, max_primary, min_secondary)
-    article, key_number, model = call_gemini(prompt)
-    article = re.sub(r"\n\s*\*\*\*\s*\n\s*#{2,3}\s*(SEO|سئو).*$", "", article, flags=re.IGNORECASE | re.DOTALL).strip()
-    report = article_report(article, data, target, secondary)
-    needs_correction = (abs(report["wordCount"] - target) > 70 or
-                        report["primaryCount"] < report["primaryMin"] or
-                        report["primaryCount"] > report["primaryMax"])
-    corrected = False
-    if needs_correction and os.getenv("GEMINI_AUTO_CORRECT", "true").lower() != "false":
-        if language == "en":
-            correction = f"""Revise the Markdown article below. Keep every existing H2 heading exactly unchanged. Reach {target} words ±30. Use the exact primary keyword “{data['primaryKeyword']}” between {min_primary} and {max_primary} times, naturally, and once in the first 100 words. Preserve factual caution and do not add fabricated claims. Return only the complete revised article.\n\n{article}"""
-        else:
-            correction = f"""مقاله Markdown زیر را اصلاح کن. تمام H2های موجود را دقیقاً بدون تغییر نگه دار. متن را به {target} کلمه با تلورانس ±۳۰ برسان. عبارت دقیق «{data['primaryKeyword']}» را بین {min_primary} تا {max_primary} بار طبیعی و یک بار در ۱۰۰ کلمه اول استفاده کن. احتیاط علمی را حفظ کن و ادعای ساختگی نساز. فقط متن کامل اصلاح‌شده را برگردان.\n\n{article}"""
-        try:
-            article, key_number, model = call_gemini(correction, temperature=0.45)
-            report = article_report(article, data, target, secondary)
-            corrected = True
-        except Exception:
-            corrected = False
-    return {"ok": True, "article": article, "report": report, "language": language,
-            "model": model, "keyNumber": key_number, "autoCorrected": corrected,
-            "disclaimer": "AI-generated content requires human editorial review; medical content also requires qualified medical review."}
-
-
 def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 20):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     hdr = {"User-Agent": USER_AGENT, "Content-Type": "application/json", "Accept": "application/json"}
@@ -593,21 +395,6 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
     except HTTPError as exc:
         raw = exc.read(200_000).decode("utf-8", errors="replace")
         raise ValueError(f"Provider HTTP {exc.code}: {raw[:500]}")
-
-
-def get_json(url: str, headers: dict | None = None, timeout: int = 20):
-    hdr = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-    if headers:
-        hdr.update(headers)
-    req = Request(url, headers=hdr, method="GET")
-    opener = build_opener(SafeRedirect())
-    try:
-        with opener.open(req, timeout=timeout) as response:
-            raw = response.read(1_000_000).decode("utf-8", errors="replace")
-            return int(response.status), json.loads(raw)
-    except HTTPError as exc:
-        raw = exc.read(200_000).decode("utf-8", errors="replace")
-        raise ValueError(f"Search provider HTTP {exc.code}: {raw[:500]}")
 
 
 def post_multipart(url: str, fields: dict, file_field: str, filename: str, content_type: str,
@@ -844,77 +631,6 @@ def search_vendors(payload: dict):
     }
 
 
-def search_clinics(payload: dict):
-    """Search adapter for public medical-clinic discovery; never collects patient data."""
-    query = str(payload.get("query", "")).strip()[:350]
-    location = str(payload.get("location", "Tehran")).strip()[:120]
-    specialty = str(payload.get("specialty", "medical clinic")).strip()[:120]
-    engines = payload.get("engines") if isinstance(payload.get("engines"), list) else []
-    engines = [str(x).lower()[:30] for x in engines[:8]]
-    if not query:
-        query = f"{specialty} {location} official website contact"
-    combined = f"{query} {location}".strip()
-    webhook = os.getenv("CLINIC_SEARCH_WEBHOOK_URL", "")
-    token = os.getenv("CLINIC_SEARCH_WEBHOOK_TOKEN", "")
-    if webhook:
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        status, response = post_json(webhook, {
-            "query": query, "location": location, "specialty": specialty,
-            "engines": engines, "limit": 20, "publicBusinessOnly": True,
-        }, headers)
-        source_items = response.get("items", []) if isinstance(response, dict) else []
-        items = []
-        for item in source_items[:20]:
-            if not isinstance(item, dict):
-                continue
-            items.append({
-                "name": str(item.get("name", ""))[:180],
-                "website": str(item.get("website", ""))[:500],
-                "phone": str(item.get("phone", ""))[:100],
-                "address": str(item.get("address", ""))[:500],
-                "specialty": str(item.get("specialty", specialty))[:150],
-                "source": str(item.get("source", item.get("evidence", "")))[:500],
-                "summary": str(item.get("summary", ""))[:600],
-                "verified": bool(item.get("verified", False)),
-            })
-        return {"ok": True, "configured": True, "providerStatus": status, "items": items,
-                "disclaimer": "Candidates only. Verify medical license, identity, public contact details and active status independently."}
-    brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "")
-    if brave_key:
-        params = urlencode({"q": combined, "count": 20, "search_lang": "fa", "safesearch": "strict"})
-        status, response = get_json("https://api.search.brave.com/res/v1/web/search?" + params,
-                                    {"X-Subscription-Token": brave_key})
-        results = ((response.get("web") or {}).get("results") or []) if isinstance(response, dict) else []
-        items = []
-        for result in results[:20]:
-            if not isinstance(result, dict):
-                continue
-            items.append({"name": str(result.get("title", ""))[:180],
-                          "website": str(result.get("url", ""))[:500],
-                          "phone": "", "address": "", "specialty": specialty,
-                          "source": str(result.get("url", ""))[:500],
-                          "summary": str(result.get("description", ""))[:600],
-                          "verified": False})
-        return {"ok": True, "configured": True, "provider": "brave", "providerStatus": status,
-                "items": items,
-                "disclaimer": "Brave web results are discovery candidates, not verified medical providers. Confirm license, identity and public contact information."}
-    encoded = quote_plus(combined)
-    directory_query = quote_plus(f"site:paziresh24.com OR site:nobat.ir {combined}")
-    return {
-        "ok": True,
-        "configured": False,
-        "items": [],
-        "searchLinks": {
-            "duckduckgo": "https://duckduckgo.com/?q=" + encoded,
-            "google": "https://www.google.com/search?q=" + encoded,
-            "bing": "https://www.bing.com/search?q=" + encoded,
-            "brave": "https://search.brave.com/search?q=" + encoded,
-            "medicalDirectories": "https://www.google.com/search?q=" + directory_query,
-        },
-        "disclaimer": "No clinic-search adapter is configured. Links search public business information only; do not collect patient data or infer sensitive traits.",
-    }
-
-
 def make_proposal_pdf(payload: dict) -> tuple[bytes, str]:
     """Create a real A4 PDF with Pillow/RAQM; browser print remains the fallback."""
     if not PILLOW_AVAILABLE:
@@ -951,9 +667,8 @@ def make_proposal_pdf(payload: dict) -> tuple[bytes, str]:
     W, H = 1240, 1754
     image = Image.new("RGB", (W, H), "white")
     draw = ImageDraw.Draw(image)
-    bundled_fonts = ROOT / "assets" / "fonts"
-    regular_path = str(bundled_fonts / "DejaVuSans.ttf") if (bundled_fonts / "DejaVuSans.ttf").exists() else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    bold_path = str(bundled_fonts / "DejaVuSans-Bold.ttf") if (bundled_fonts / "DejaVuSans-Bold.ttf").exists() else "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    regular_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     layout = ImageFont.Layout.RAQM if hasattr(ImageFont, "Layout") else None
     regular = lambda n: ImageFont.truetype(regular_path, n, layout_engine=layout)
     bold = lambda n: ImageFont.truetype(bold_path, n, layout_engine=layout)
@@ -1096,31 +811,11 @@ def make_proposal_pdf(payload: dict) -> tuple[bytes, str]:
     return output.getvalue(), f"proposal-{safe_name}.pdf"
 
 
-def cleanup_pdf_links():
-    now = time.time()
-    for token in [k for k, v in PDF_LINKS.items() if v.get("expires", 0) <= now]:
-        PDF_LINKS.pop(token, None)
-    if len(PDF_LINKS) >= PDF_LINK_LIMIT:
-        oldest = sorted(PDF_LINKS, key=lambda key: PDF_LINKS[key].get("created", 0))
-        for token in oldest[:len(PDF_LINKS) - PDF_LINK_LIMIT + 1]:
-            PDF_LINKS.pop(token, None)
-
-
-def store_proposal_link(payload: dict):
-    cleanup_pdf_links()
-    pdf, filename = make_proposal_pdf(payload)
-    token = secrets.token_urlsafe(24)
-    now = time.time()
-    PDF_LINKS[token] = {"pdf": pdf, "filename": filename, "created": now,
-                        "expires": now + PDF_LINK_TTL, "downloads": 0}
-    return token, filename, int(now + PDF_LINK_TTL)
-
-
 class Handler(SimpleHTTPRequestHandler):
     server_version = "ClinicSignal/1.1"
 
     def translate_path(self, path):
-        clean = urlparse(path).path.lstrip("/") or "app.html"
+        clean = urlparse(path).path.lstrip("/") or "index.html"
         target = (ROOT / clean).resolve()
         if ROOT not in target.parents and target != ROOT:
             return str(ROOT / "index.html")
@@ -1129,7 +824,7 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self' data: https:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self' data: https:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors 'self'")
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
@@ -1144,20 +839,6 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def public_base_url(self):
-        configured = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
-        if configured:
-            parsed = urlparse(configured)
-            if parsed.scheme in {"http", "https"} and parsed.netloc:
-                return configured
-        proto = self.headers.get("X-Forwarded-Proto", "http").split(",", 1)[0].strip()
-        if proto not in {"http", "https"}:
-            proto = "http"
-        host = self.headers.get("X-Forwarded-Host", self.headers.get("Host", "127.0.0.1:8000")).split(",", 1)[0].strip()
-        if not re.fullmatch(r"[A-Za-z0-9.:[\]_-]+", host):
-            host = "127.0.0.1:8000"
-        return f"{proto}://{host}"
-
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
@@ -1166,40 +847,18 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json_response(provider_status())
         if path == "/api/send-log":
             return self.json_response({"ok": True, "items": list(SEND_LOG)})
-        match = re.fullmatch(r"/p/([A-Za-z0-9_-]{20,80})\.pdf", path)
-        if match:
-            cleanup_pdf_links()
-            item = PDF_LINKS.get(match.group(1))
-            if not item:
-                return self.json_response({"ok": False, "error": "PDF link expired or not found"}, 404)
-            item["downloads"] = int(item.get("downloads", 0)) + 1
-            pdf = item["pdf"]
-            self.send_response(200)
-            self.send_header("Content-Type", "application/pdf")
-            self.send_header("Content-Disposition", f'inline; filename="{item["filename"]}"')
-            self.send_header("Content-Length", str(len(pdf)))
-            self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
-            self.end_headers()
-            self.wfile.write(pdf)
-            return
         return super().do_GET()
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/audit", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
+        if path not in {"/api/audit", "/api/send", "/api/vendor-search", "/api/proposal-pdf"}:
             return self.json_response({"ok": False, "error": "Not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/proposal-link", "/api/send"} else 30_000
+            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/send"} else 30_000
             if length <= 0 or length > request_limit:
                 raise ValueError("Invalid request size")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            if path == "/api/proposal-link":
-                token, filename, expires_at = store_proposal_link(payload)
-                return self.json_response({"ok": True, "url": f"{self.public_base_url()}/p/{token}.pdf",
-                                           "filename": filename, "expiresAt": expires_at,
-                                           "ttlSeconds": PDF_LINK_TTL,
-                                           "warning": "Temporary link; it expires and may be lost if a free container restarts."})
             if path == "/api/proposal-pdf":
                 pdf, filename = make_proposal_pdf(payload)
                 self.send_response(200)
@@ -1213,10 +872,6 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_response(send_message(payload))
             if path == "/api/vendor-search":
                 return self.json_response(search_vendors(payload))
-            if path == "/api/clinic-search":
-                return self.json_response(search_clinics(payload))
-            if path == "/api/generate-article":
-                return self.json_response(generate_seo_article(payload))
             url = str(payload.get("url", "")).strip()
             if not url:
                 raise ValueError("URL is required")
@@ -1224,11 +879,7 @@ class Handler(SimpleHTTPRequestHandler):
         except (ValueError, URLError, HTTPError, socket.timeout, TimeoutError) as exc:
             return self.json_response({"ok": False, "error": str(exc), "type": type(exc).__name__}, 400)
         except Exception as exc:
-            label = ("Send" if path == "/api/send" else
-                     "Vendor search" if path == "/api/vendor-search" else
-                     "Clinic search" if path == "/api/clinic-search" else
-                     "Article generation" if path == "/api/generate-article" else
-                     "Proposal PDF" if path in {"/api/proposal-pdf", "/api/proposal-link"} else "Audit")
+            label = "Send" if path == "/api/send" else "Vendor search" if path == "/api/vendor-search" else "Proposal PDF" if path == "/api/proposal-pdf" else "Audit"
             return self.json_response({"ok": False, "error": f"{label} failed: {type(exc).__name__}: {exc}"}, 500)
 
 

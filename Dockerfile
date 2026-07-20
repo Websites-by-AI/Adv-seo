@@ -17,7 +17,6 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-RUN python build_standalone.py
 
 EXPOSE 7860
 

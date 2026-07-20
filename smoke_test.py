@@ -9,7 +9,6 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
@@ -20,11 +19,6 @@ BASE = f"http://127.0.0.1:{PORT}"
 def get(path):
     with urlopen(BASE + path, timeout=10) as r:
         return r.status, r.read().decode("utf-8")
-
-
-def get_raw(path):
-    with urlopen(BASE + path, timeout=15) as r:
-        return r.status, r.headers.get("Content-Type", ""), r.read()
 
 
 def post(path, payload):
@@ -67,21 +61,14 @@ def main():
         assert status == 200 and "Clinic Signal" in html and "ایجنت ممیزی" in html
         assert "WhatsApp Business" in html and "DIVAR_PARTNER_WEBHOOK_URL" in html
         assert "سازنده پیشنهاد PDF" in html and "یافتن شرکت مناسب" in html
-        assert '<script>' in html and '<style>' in html and 'data:text/javascript' not in html
-        assert 'function printProposal' in html and 'function renderPartners' in html
+        assert 'static/app.js' in html and 'static/styles.css' in html
+        assert '<script>' not in html and '<style>' not in html
         assert "https://cdn" not in html and "fonts.googleapis" not in html
         js_status, js = get("/static/app.js")
         css_status, css = get("/static/styles.css")
-        mobile_status, mobile_css = get("/static/mobile-fixes.css")
         assert js_status == 200 and "function printProposal" in js and "function renderPartners" in js
         assert css_status == 200 and ".proposal-page" in css and ".channel-card" in css
-        assert mobile_status == 200 and "viewport" not in mobile_css and "safe-area-inset" in mobile_css and ".pdf-link-box" in mobile_css
-        print("PASS full application bundle plus modular source assets")
-
-        preview = (ROOT / "index.html").read_text(encoding="utf-8")
-        assert "بدون JavaScript و بدون نمایش کد" in preview and "<script" not in preview
-        assert 'class="side"' in preview and 'class="bottom"' in preview
-        print("PASS Arena-safe static homepage without JavaScript leakage")
+        print("PASS clean split frontend: HTML, CSS and JavaScript assets")
 
         status, integrations = get("/api/integrations")
         integrations = json.loads(integrations)
@@ -95,11 +82,6 @@ def main():
         assert vendor_search["configured"] is False and "google" in vendor_search["searchLinks"]
         print("PASS safe vendor-search fallback")
 
-        status, clinic_search = post("/api/clinic-search", {"query": "کلینیک پزشکی سلامت جنسی سکسولوژی تهران سایت رسمی", "location": "تهران", "specialty": "sexual-health", "engines": ["duckduckgo", "google", "bing", "brave"]})
-        assert status == 200 and clinic_search["ok"] is True and clinic_search["configured"] is False
-        assert {"duckduckgo", "google", "bing", "brave"}.issubset(clinic_search["searchLinks"])
-        print("PASS multi-engine medical-clinic search fallback")
-
         if integrations.get("proposalPdfMode") == "direct-download":
             status, content_type, pdf = post_raw("/api/proposal-pdf", {
                 "agency": "Clinic Signal Partner", "agencyProfile": {"name": "سئوف", "phone": "02166902605", "website": "https://seof.ir", "email": "info@seof.ir", "address": "تهران، خیابان جمالزاده جنوبی", "hours": "شنبه تا چهارشنبه", "logoData": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n3sAAAAASUVORK5CYII="}, "validity": "14 days", "setup": "35M", "monthly": "45M", "media": "12M", "duration": "9 months",
@@ -107,15 +89,6 @@ def main():
             })
             assert status == 200 and "application/pdf" in content_type and pdf.startswith(b"%PDF") and len(pdf) > 5000
             print(f"PASS direct Persian proposal PDF ({len(pdf)} bytes)")
-
-            link_payload = {"agency": "سئوف", "agencyProfile": {"name": "سئوف", "phone": "02166902605"},
-                "lead": {"id": "share-test", "name": "کلینیک لینک آزمایشی", "seo": 50, "opportunity": 70, "priority": "P1", "package": "رشد", "tech": "بررسی فنی", "issue": "بهبود سئو", "plan": "برنامه ۹۰روزه", "target": "تهران"}}
-            status, share = post("/api/proposal-link", link_payload)
-            assert status == 200 and share["ok"] is True and share["url"].endswith(".pdf")
-            pdf_path = urlparse(share["url"]).path
-            link_status, link_type, linked_pdf = get_raw(pdf_path)
-            assert link_status == 200 and "application/pdf" in link_type and linked_pdf.startswith(b"%PDF")
-            print("PASS temporary shareable proposal PDF link")
 
         status, denied = post("/api/send", {"channel": "email", "recipient": "test@example.com", "message": "Hello"})
         assert status == 400 and denied["ok"] is False
