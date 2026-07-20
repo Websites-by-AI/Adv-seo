@@ -1,10 +1,12 @@
 -- Run in Supabase SQL Editor.
+-- Safe for a new installation and additive for the earlier clinic_leads schema.
 create extension if not exists pgcrypto;
 
 create table if not exists public.clinic_leads (
   id uuid primary key default gen_random_uuid(),
+  dedupe_key text not null unique,
   name text not null,
-  website text not null unique,
+  website text default '',
   phone text default '',
   address text default '',
   specialty text default '',
@@ -18,6 +20,27 @@ create table if not exists public.clinic_leads (
   updated_at timestamptz not null default now()
 );
 
+-- Upgrade an older table that used website as the only unique key.
+alter table public.clinic_leads add column if not exists dedupe_key text;
+alter table public.clinic_leads alter column website drop not null;
+alter table public.clinic_leads alter column website set default '';
+
+update public.clinic_leads
+set dedupe_key = case
+  when coalesce(trim(website), '') <> '' then
+    'website:' || lower(regexp_replace(regexp_replace(trim(website), '^https?://(www\.)?', '', 'i'), '/.*$', ''))
+  else
+    'entity:' || encode(digest(lower(
+      coalesce(name, '') || '|' || coalesce(phone, '') || '|' ||
+      coalesce(address, '') || '|' || coalesce(source, '')
+    ), 'sha256'), 'hex')
+end
+where dedupe_key is null or dedupe_key = '';
+
+alter table public.clinic_leads alter column dedupe_key set not null;
+alter table public.clinic_leads drop constraint if exists clinic_leads_website_key;
+create unique index if not exists clinic_leads_dedupe_key_uidx on public.clinic_leads(dedupe_key);
+create index if not exists clinic_leads_website_idx on public.clinic_leads(website) where website <> '';
 create index if not exists clinic_leads_status_idx on public.clinic_leads(status);
 create index if not exists clinic_leads_specialty_idx on public.clinic_leads(specialty);
 create index if not exists clinic_leads_created_at_idx on public.clinic_leads(created_at desc);

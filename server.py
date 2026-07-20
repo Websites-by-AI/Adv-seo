@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import hmac
 import ipaddress
 import json
 import math
@@ -40,6 +41,42 @@ PDF_LINKS: dict[str, dict] = {}
 PDF_LINK_TTL = max(300, min(int(os.getenv("PDF_LINK_TTL_SECONDS", "86400")), 604800))
 PDF_LINK_LIMIT = max(10, min(int(os.getenv("PDF_LINK_LIMIT", "100")), 500))
 ALLOWED_CHANNELS = {"whatsapp", "telegram", "bale", "rubika", "soroush", "eitaa", "email", "sms", "divar"}
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def integration_auth_error(headers, path: str) -> tuple[int, str] | None:
+    """Validate Next.js → Python calls without exposing the shared token to a browser.
+
+    X-Clinic-Signal-Internal makes verification mandatory for the Next.js gateway.
+    CLINIC_SIGNAL_REQUIRE_AUTH=true optionally protects every /api route except signed PDF reads.
+    The standalone Clinic Signal browser UI needs the latter left false unless a separate login
+    or hosting-level access guard is configured.
+    """
+    if not path.startswith("/api/"):
+        return None
+    internal_call = str(headers.get("X-Clinic-Signal-Internal", "")).strip() == "1"
+    globally_required = env_flag("CLINIC_SIGNAL_REQUIRE_AUTH", False)
+    if not internal_call and not globally_required:
+        return None
+    if path in {"/api/shared-pdf"} and not internal_call:
+        return None
+
+    expected = os.getenv("CLINIC_SIGNAL_API_TOKEN", "").strip()
+    if len(expected) < 24:
+        return 503, "CLINIC_SIGNAL_API_TOKEN is missing or shorter than 24 characters."
+    authorization = str(headers.get("Authorization", ""))
+    provided = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
+    if not provided or not hmac.compare_digest(provided, expected):
+        return 401, "Invalid Clinic Signal integration token."
+    return None
+
+
 try:
     from PIL import Image, ImageDraw, ImageFont, features as pil_features
     PILLOW_AVAILABLE = True
@@ -110,6 +147,7 @@ class AuditParser(HTMLParser):
         self.phone_links: set[str] = set()
         self.email_links: set[str] = set()
         self.text_chars = 0
+        self.text_words = 0
         self.phone_signal = False
         self.address_signal = False
         self.map_or_social_signal = False
@@ -188,6 +226,7 @@ class AuditParser(HTMLParser):
         clean = " ".join(data.split())
         if clean:
             self.text_chars += len(clean)
+            self.text_words += len(clean.split())
             low = clean.lower()
             if re.search(r'(?:\+?98|0)?21[-\s]?\d{5,8}', clean) or re.search(r'09\d{9}', clean):
                 self.phone_signal = True
@@ -324,7 +363,23 @@ def audit(url: str):
     if not urlparse(url).scheme:
         url = "https://" + url.strip()
     started = time.monotonic()
-    status, final_url, html, content_type, elapsed = fetch(url)
+    try:
+        status, final_url, html, content_type, elapsed = fetch(url)
+    except (URLError, ssl.SSLCertVerificationError) as exc:
+        message = str(exc)
+        if "CERTIFICATE_VERIFY_FAILED" not in message and "certificate" not in message.lower() and "ssl" not in message.lower():
+            raise
+        return {"ok": True, "requestedUrl": url, "status": 0, "finalUrl": url,
+                "elapsedSeconds": round(time.monotonic()-started, 2), "totalSeconds": round(time.monotonic()-started, 2),
+                "title": "", "titleLength": 0, "description": "", "descriptionLength": 0,
+                "h1Count": 0, "h1": [], "canonical": "", "lang": "", "viewport": False,
+                "schemaBlocks": 0, "schemaTypes": [], "wordCount": 0,
+                "internalLinks": 0, "externalLinks": 0, "internalLinkSamples": [], "externalLinkSamples": [],
+                "socialLinks": [], "phoneLinks": [], "emailLinks": [], "textCharacters": 0,
+                "robots": False, "sitemap": False, "seoScore": 5, "sslError": True,
+                "issues": ["SSL certificate validation failed or the certificate has expired", message[:300]],
+                "wins": [], "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "disclaimer": "SSL failure is a measured critical availability issue. Confirm from the target market before outreach."}
     if "html" not in content_type.lower() and "<html" not in html[:1000].lower():
         raise ValueError("The URL did not return an HTML page.")
     parser = AuditParser(final_url)
@@ -355,7 +410,10 @@ def audit(url: str):
         "h1": parser.h1[:3],
         "canonical": parser.canonical,
         "lang": parser.lang,
+        "viewport": parser.viewport,
+        "schemaBlocks": parser.schema_blocks,
         "schemaTypes": sorted(parser.schema_types),
+        "wordCount": parser.text_words,
         "internalLinks": len(internal_urls),
         "externalLinks": len(external_urls),
         "internalLinkSamples": internal_urls[:24],
@@ -396,7 +454,12 @@ def provider_status():
         "dryRun": DRY_RUN,
         "providers": providers,
         "vendorSearchConfigured": bool(os.getenv("VENDOR_SEARCH_WEBHOOK_URL")),
-        "clinicSearchConfigured": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL") or os.getenv("BRAVE_SEARCH_API_KEY")),
+        "clinicSearchConfigured": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL") or os.getenv("BRAVE_SEARCH_API_KEY") or os.getenv("GOOGLE_PLACES_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")),
+        "clinicSearchProviders": {
+            "webhook": bool(os.getenv("CLINIC_SEARCH_WEBHOOK_URL")),
+            "googlePlaces": bool(os.getenv("GOOGLE_PLACES_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")),
+            "brave": bool(os.getenv("BRAVE_SEARCH_API_KEY")),
+        },
         "geminiConfigured": bool(get_gemini_keys()),
         "scraperConfigured": bool(scraper_allowed_domains()),
         "leadDatabaseConfigured": bool(database["configured"] or webhook_database),
@@ -1115,6 +1178,53 @@ def search_clinics(payload: dict):
             })
         return {"ok": True, "configured": True, "mode": "api", "provider": "webhook", "providerStatus": status, "items": items,
                 "disclaimer": "Candidates only. Verify medical license, identity, public contact details and active status independently."}
+    google_places_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip() or os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+    if google_places_key and (not engines or "google" in engines):
+        field_mask = ",".join([
+            "places.id", "places.displayName", "places.formattedAddress",
+            "places.nationalPhoneNumber", "places.internationalPhoneNumber",
+            "places.websiteUri", "places.googleMapsUri", "places.primaryTypeDisplayName",
+            "places.businessStatus",
+        ])
+        status, response = post_json(
+            "https://places.googleapis.com/v1/places:searchText",
+            {"textQuery": combined, "languageCode": "fa", "pageSize": 20},
+            {"X-Goog-Api-Key": google_places_key, "X-Goog-FieldMask": field_mask},
+            timeout=25,
+        )
+        places = response.get("places", []) if isinstance(response, dict) else []
+        items = []
+        for place in places[:20]:
+            if not isinstance(place, dict):
+                continue
+            display = place.get("displayName") if isinstance(place.get("displayName"), dict) else {}
+            primary_type = place.get("primaryTypeDisplayName") if isinstance(place.get("primaryTypeDisplayName"), dict) else {}
+            website = str(place.get("websiteUri", ""))[:500]
+            maps_url = str(place.get("googleMapsUri", ""))[:500]
+            business_status = str(place.get("businessStatus", ""))[:60]
+            no_site = not bool(website)
+            items.append({
+                "name": str(display.get("text", ""))[:180],
+                "website": website,
+                "phone": str(place.get("internationalPhoneNumber") or place.get("nationalPhoneNumber") or "")[:100],
+                "address": str(place.get("formattedAddress", ""))[:500],
+                "specialty": str(primary_type.get("text") or specialty)[:150],
+                "source": maps_url,
+                "summary": f"Google Places public business result. Status: {business_status or 'not provided'}",
+                "verified": False,
+                "resultType": "structured-medical-entity",
+                "placeId": str(place.get("id", ""))[:200],
+                "websiteStatus": "no-website-found" if no_site else "official-website-provided",
+                "seoScore": 0 if no_site else 45,
+                "opportunityScore": 94 if no_site else 65,
+                "recommendedPackage": "Website Launch + Local SEO" if no_site else "SEO Audit + Web Design Review",
+            })
+        return {
+            "ok": True, "configured": True, "mode": "api", "provider": "google-places",
+            "providerStatus": status, "items": items,
+            "disclaimer": "Google Places results are public business candidates, not medical-quality rankings. Verify identity, license, official website and contact details independently.",
+        }
+
     brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "")
     if brave_key:
         params = urlencode({"q": combined, "count": 20, "search_lang": "fa", "safesearch": "strict"})
@@ -1141,7 +1251,7 @@ def search_clinics(payload: dict):
         "configured": False,
         "mode": "links",
         "items": [],
-        "requiredConfiguration": ["BRAVE_SEARCH_API_KEY", "CLINIC_SEARCH_WEBHOOK_URL"],
+        "requiredConfiguration": ["GOOGLE_PLACES_API_KEY", "BRAVE_SEARCH_API_KEY", "CLINIC_SEARCH_WEBHOOK_URL"],
         "searchLinks": {
             "duckduckgo": "https://duckduckgo.com/?q=" + encoded,
             "google": "https://www.google.com/search?q=" + encoded,
@@ -1566,9 +1676,27 @@ def supabase_settings():
             "configured": bool(url and key)}
 
 
+def lead_dedupe_key(item: dict, website: str) -> str:
+    if website:
+        try:
+            parsed = urlparse(website if urlparse(website).scheme else "https://" + website)
+            host = (parsed.hostname or "").lower().removeprefix("www.")
+            if host:
+                return "website:" + host[:220]
+        except Exception:
+            pass
+    identity = "|".join([
+        str(item.get("placeId", "")), str(item.get("name", "")),
+        str(item.get("phone", "")), str(item.get("address", item.get("area", ""))),
+        str(item.get("source", "")),
+    ]).strip("|").lower()
+    return "entity:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 def normalize_lead_row(item: dict):
     website = str(item.get("website", "")).strip()[:500]
     return {
+        "dedupe_key": lead_dedupe_key(item, website),
         "name": str(item.get("name", "Clinic candidate"))[:180],
         "website": website,
         "phone": str(item.get("phone", ""))[:100],
@@ -1585,13 +1713,13 @@ def normalize_lead_row(item: dict):
 
 def persist_leads_database(items: list[dict]):
     rows = [normalize_lead_row(item) for item in items[:100] if isinstance(item, dict)]
-    rows = [row for row in rows if row["website"]]
+    rows = [row for row in rows if row["name"] and (row["website"] or row["phone"] or row["address"] or row["source"])]
     if not rows:
-        raise ValueError("No valid lead rows were supplied.")
+        raise ValueError("No valid lead rows were supplied. A name plus website, phone, address or source is required.")
     settings = supabase_settings()
     supabase_url, supabase_key, table = settings["url"], settings["key"], settings["table"]
     if settings["configured"]:
-        endpoint = f"{supabase_url}/rest/v1/{table}?on_conflict=website"
+        endpoint = f"{supabase_url}/rest/v1/{table}?on_conflict=dedupe_key"
         response = requests.post(endpoint, headers={"apikey": supabase_key,
             "Authorization": f"Bearer {supabase_key}", "Content-Type": "application/json",
             "Prefer": "resolution=merge-duplicates,return=representation"}, json=rows, timeout=30)
@@ -1622,6 +1750,172 @@ def fetch_leads_database(limit: int = 100):
         raise ValueError(f"Supabase HTTP {response.status_code}: {response.text[:500]}")
     return {"ok": True, "provider": "supabase", "items": response.json(), "table": table,
             "detectedVariables": {"url": settings["urlVariable"], "key": settings["keyVariable"]}}
+
+
+EXHIBITION_FIELD_ALIASES = {
+    "company": {"company", "company name", "exhibitor", "name", "شرکت", "نام شرکت", "مشارکت کننده", "غرفه دار"},
+    "booth": {"booth", "stand", "hall/booth", "غرفه", "شماره غرفه", "سالن و غرفه"},
+    "category": {"category", "industry", "sector", "محصول", "گروه", "حوزه فعالیت", "صنعت"},
+    "phone": {"phone", "telephone", "mobile", "tel", "تلفن", "شماره تماس", "موبایل"},
+    "website": {"website", "site", "url", "وب سایت", "وب‌سایت", "سایت"},
+    "email": {"email", "e-mail", "ایمیل", "پست الکترونیک"},
+    "city": {"city", "location", "شهر", "استان", "موقعیت"},
+}
+
+
+def map_exhibition_header(value: str):
+    normalized = re.sub(r"\s+", " ", str(value).strip().lower())
+    for field, aliases in EXHIBITION_FIELD_ALIASES.items():
+        if normalized in aliases:
+            return field
+    return normalized
+
+
+def normalize_exhibitor(row: dict, event: dict):
+    mapped = {}
+    for key, value in row.items():
+        mapped[map_exhibition_header(key)] = " ".join(str(value or "").split())
+    company = mapped.get("company") or mapped.get("نام") or next((v for v in mapped.values() if v), "")
+    website = mapped.get("website", "").strip()
+    if website and not website.startswith(("http://", "https://")):
+        website = "https://" + website
+    return {"name": company[:220], "website": website[:500], "phone": mapped.get("phone", "")[:100],
+            "email": mapped.get("email", "")[:180], "city": mapped.get("city", "")[:150],
+            "booth": mapped.get("booth", "")[:100], "category": mapped.get("category", "")[:180],
+            "eventName": str(event.get("name", ""))[:220], "eventDate": str(event.get("date", ""))[:100],
+            "eventLocation": str(event.get("location", ""))[:220], "eventSource": str(event.get("source", ""))[:500],
+            "source": "exhibition-import", "resultType": "exhibitor", "verified": False, "raw": mapped}
+
+
+def parse_exhibition_data(payload: dict):
+    raw = str(payload.get("data", ""))
+    if not raw.strip():
+        raise ValueError("Exhibition list data is required.")
+    if len(raw.encode("utf-8")) > 2_000_000:
+        raise ValueError("Exhibition import is larger than 2 MB.")
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    fmt = str(payload.get("format", "auto")).lower()
+    items = []
+    if fmt == "html" or (fmt == "auto" and re.search(r"<table|<tr|<td", raw, re.IGNORECASE)):
+        soup = BeautifulSoup(raw, "html.parser")
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            if not rows:
+                continue
+            header_cells = rows[0].find_all(["th", "td"])
+            headers = [cell.get_text(" ", strip=True) or f"column_{i+1}" for i, cell in enumerate(header_cells)]
+            for tr in rows[1:]:
+                cells = [cell.get_text(" ", strip=True) for cell in tr.find_all(["td", "th"])]
+                if not cells:
+                    continue
+                row = {headers[i] if i < len(headers) else f"column_{i+1}": value for i, value in enumerate(cells)}
+                item = normalize_exhibitor(row, event)
+                if item["name"]:
+                    items.append(item)
+    else:
+        sample = raw[:5000]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            has_header = csv.Sniffer().has_header(sample)
+        except csv.Error:
+            dialect, has_header = csv.excel, False
+        stream = StringIO(raw)
+        if has_header:
+            reader = csv.DictReader(stream, dialect=dialect)
+            for row in reader:
+                item = normalize_exhibitor(dict(row), event)
+                if item["name"]:
+                    items.append(item)
+        else:
+            reader = csv.reader(stream, dialect=dialect)
+            for cells in reader:
+                cells = [" ".join(str(cell).split()) for cell in cells]
+                if not any(cells):
+                    continue
+                row = {"company": cells[0]}
+                if len(cells) > 1: row["booth"] = cells[1]
+                if len(cells) > 2: row["category"] = cells[2]
+                if len(cells) > 3: row["phone"] = cells[3]
+                if len(cells) > 4: row["website"] = cells[4]
+                item = normalize_exhibitor(row, event)
+                if item["name"]:
+                    items.append(item)
+    deduped, seen = [], set()
+    for item in items[:1000]:
+        key = re.sub(r"\W+", "", item["name"].lower())
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return {"ok": True, "items": deduped, "count": len(deduped), "event": event,
+            "disclaimer": "Exhibitor data is imported as unverified public-business leads. Confirm identity and contact details before outreach."}
+
+
+def find_company_website_brave(company: str, city: str = ""):
+    key = os.getenv("BRAVE_SEARCH_API_KEY", "")
+    query = f'"{company}" {city} official website وب سایت رسمی'.strip()
+    links = {"google": "https://www.google.com/search?q=" + quote_plus(query),
+             "duckduckgo": "https://duckduckgo.com/?q=" + quote_plus(query),
+             "bing": "https://www.bing.com/search?q=" + quote_plus(query)}
+    if not key:
+        return "", links, "links"
+    params = urlencode({"q": query, "count": 10, "search_lang": "fa", "safesearch": "strict"})
+    _, response = get_json("https://api.search.brave.com/res/v1/web/search?" + params,
+                           {"X-Subscription-Token": key})
+    results = ((response.get("web") or {}).get("results") or []) if isinstance(response, dict) else []
+    blocked = ("instagram.com", "linkedin.com", "facebook.com", "t.me", "wikipedia.org", "paziresh24.com", "nobat.ir")
+    for result in results:
+        url = str(result.get("url", ""))
+        host = (urlparse(url).hostname or "").lower()
+        if url.startswith("http") and not any(host == b or host.endswith("." + b) for b in blocked):
+            return url, links, "brave"
+    return "", links, "brave"
+
+
+def enrich_exhibition_companies(payload: dict):
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    run_audit = payload.get("audit") is not False
+    if not items:
+        raise ValueError("Select exhibition companies for enrichment.")
+    output = []
+    for item in items[:8]:
+        if not isinstance(item, dict):
+            continue
+        enriched = dict(item)
+        website = str(enriched.get("website", "")).strip()
+        links = {}
+        discovery_mode = "provided"
+        if not website:
+            website, links, discovery_mode = find_company_website_brave(str(enriched.get("name", "")), str(enriched.get("city", "")))
+            enriched["website"] = website
+        enriched["websiteSearchLinks"] = links
+        enriched["websiteDiscoveryMode"] = discovery_mode
+        if website and run_audit:
+            try:
+                report = audit(website)
+                enriched["audit"] = report
+                score = int(report.get("seoScore", 0) or 0)
+                enriched["seoScore"] = score
+                enriched["websiteStatus"] = "working" if report.get("status") == 200 else "error"
+                enriched["opportunityScore"] = max(20, min(95, round((100-score)*0.75 + 25)))
+                enriched["recommendedPackage"] = "Technical SEO Recovery" if score < 50 else "SEO Growth 90 Days" if score < 80 else "Content & CRO Growth"
+            except Exception as exc:
+                enriched["websiteStatus"] = "audit-error"
+                enriched["auditError"] = str(exc)[:300]
+                enriched["opportunityScore"] = 82
+                enriched["recommendedPackage"] = "Website Technical Recovery"
+        elif not website:
+            enriched["websiteStatus"] = "no-website-found"
+            enriched["seoScore"] = 0
+            enriched["opportunityScore"] = 94
+            enriched["recommendedPackage"] = "Website Launch + Local SEO"
+        else:
+            enriched["websiteStatus"] = "website-found"
+            enriched["opportunityScore"] = 60
+            enriched["recommendedPackage"] = "Website Audit Required"
+        output.append(enriched)
+    return {"ok": True, "items": output, "count": len(output),
+            "searchProviderConfigured": bool(os.getenv("BRAVE_SEARCH_API_KEY")),
+            "disclaimer": "Website matches and opportunity scores are unverified sales research. Confirm official ownership before outreach."}
 
 
 def make_proposal_pdf(payload: dict) -> tuple[bytes, str]:
@@ -1888,8 +2182,14 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        auth_error = integration_auth_error(self.headers, path)
+        if auth_error:
+            status, message = auth_error
+            return self.json_response({"ok": False, "error": message}, status)
         if path == "/api/health":
-            return self.json_response({"ok": True, "service": "Clinic Signal", "mode": "live-audit-and-messaging"})
+            verified = self.headers.get("X-Clinic-Signal-Internal", "") == "1"
+            return self.json_response({"ok": True, "service": "Clinic Signal", "mode": "live-audit-and-messaging",
+                                       "integrationAuth": "verified" if verified else "not-requested"})
         if path == "/api/integrations":
             return self.json_response(provider_status())
         if path == "/api/send-log":
@@ -1927,11 +2227,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/audit", "/api/ai-seo-review", "/api/analyze-clinic-candidates", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/import-search-html", "/api/enrich-clinics", "/api/scrape-directory", "/api/leads/bulk", "/api/export-clinics", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
+        auth_error = integration_auth_error(self.headers, path)
+        if auth_error:
+            status, message = auth_error
+            return self.json_response({"ok": False, "error": message}, status)
+        if path not in {"/api/audit", "/api/ai-seo-review", "/api/analyze-clinic-candidates", "/api/send", "/api/vendor-search", "/api/clinic-search", "/api/import-search-html", "/api/enrich-clinics", "/api/scrape-directory", "/api/exhibition/import", "/api/exhibition/enrich", "/api/leads/bulk", "/api/export-clinics", "/api/generate-article", "/api/proposal-pdf", "/api/proposal-link"}:
             return self.json_response({"ok": False, "error": "Not found"}, 404)
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/proposal-link", "/api/send", "/api/import-search-html", "/api/enrich-clinics", "/api/leads/bulk", "/api/export-clinics", "/api/analyze-clinic-candidates"} else 30_000
+            request_limit = 2_000_000 if path in {"/api/proposal-pdf", "/api/proposal-link", "/api/send", "/api/import-search-html", "/api/enrich-clinics", "/api/exhibition/import", "/api/exhibition/enrich", "/api/leads/bulk", "/api/export-clinics", "/api/analyze-clinic-candidates"} else 30_000
             if length <= 0 or length > request_limit:
                 raise ValueError("Invalid request size")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1975,6 +2279,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json_response(enrich_clinic_candidates(payload))
             if path == "/api/scrape-directory":
                 return self.json_response(scrape_clinic_directory(payload))
+            if path == "/api/exhibition/import":
+                return self.json_response(parse_exhibition_data(payload))
+            if path == "/api/exhibition/enrich":
+                return self.json_response(enrich_exhibition_companies(payload))
             if path == "/api/leads/bulk":
                 items = payload.get("items") if isinstance(payload.get("items"), list) else []
                 return self.json_response(persist_leads_database(items))
@@ -1996,6 +2304,8 @@ class Handler(SimpleHTTPRequestHandler):
                      "Search HTML import" if path == "/api/import-search-html" else
                      "Clinic enrichment" if path == "/api/enrich-clinics" else
                      "Directory scraper" if path == "/api/scrape-directory" else
+                     "Exhibition import" if path == "/api/exhibition/import" else
+                     "Exhibition enrichment" if path == "/api/exhibition/enrich" else
                      "Lead database" if path == "/api/leads/bulk" else
                      "Article generation" if path == "/api/generate-article" else
                      "Proposal PDF" if path in {"/api/proposal-pdf", "/api/proposal-link"} else "Audit")
