@@ -3,7 +3,7 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 30,
-      "includeFiles": ["server.py", "assets/fonts/**"],
+      "includeFiles": "{server.py,assets/fonts/**}",
       "excludeFiles": "{public/**,static/**,tests/**,smoke_test.py,sample-proposal-*.pdf,*.zip,__pycache__/**}"
     }
   },
