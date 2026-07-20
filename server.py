@@ -1036,7 +1036,7 @@ def search_clinics(payload: dict):
                 "summary": str(item.get("summary", ""))[:600],
                 "verified": bool(item.get("verified", False)),
             })
-        return {"ok": True, "configured": True, "providerStatus": status, "items": items,
+        return {"ok": True, "configured": True, "mode": "api", "provider": "webhook", "providerStatus": status, "items": items,
                 "disclaimer": "Candidates only. Verify medical license, identity, public contact details and active status independently."}
     brave_key = os.getenv("BRAVE_SEARCH_API_KEY", "")
     if brave_key:
@@ -1054,7 +1054,7 @@ def search_clinics(payload: dict):
                           "source": str(result.get("url", ""))[:500],
                           "summary": str(result.get("description", ""))[:600],
                           "verified": False})
-        return {"ok": True, "configured": True, "provider": "brave", "providerStatus": status,
+        return {"ok": True, "configured": True, "mode": "api", "provider": "brave", "providerStatus": status,
                 "items": items,
                 "disclaimer": "Brave web results are discovery candidates, not verified medical providers. Confirm license, identity and public contact information."}
     encoded = quote_plus(combined)
@@ -1062,7 +1062,9 @@ def search_clinics(payload: dict):
     return {
         "ok": True,
         "configured": False,
+        "mode": "links",
         "items": [],
+        "requiredConfiguration": ["BRAVE_SEARCH_API_KEY", "CLINIC_SEARCH_WEBHOOK_URL"],
         "searchLinks": {
             "duckduckgo": "https://duckduckgo.com/?q=" + encoded,
             "google": "https://www.google.com/search?q=" + encoded,
